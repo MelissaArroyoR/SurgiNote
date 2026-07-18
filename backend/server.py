@@ -163,6 +163,8 @@ class DailyEntry(BaseModel):
     studies: str = ""
     procedures: str = ""
     cultures: str = ""
+    vital_signs: str = ""
+    indications_changes: str = ""
     events: str = ""
     ai_pase_summary: Optional[str] = None
     ai_lab_comparison: Optional[str] = None
@@ -180,6 +182,8 @@ class DailyEntryUpsert(BaseModel):
     studies: Optional[str] = None
     procedures: Optional[str] = None
     cultures: Optional[str] = None
+    vital_signs: Optional[str] = None
+    indications_changes: Optional[str] = None
     events: Optional[str] = None
 
 
@@ -820,142 +824,85 @@ def _cell_classification_score(text: str) -> int:
 
 
 def _parse_row_deterministic(cells: list[str]) -> Optional[dict]:
-    """Parse one table row (list of cell texts) into a patient dict using pure regex."""
+    """POSITIONAL parser (fixed column layout):
+    COL 0: bed, tratante, residentes...
+    COL 1: name, edad, DEIH, DPQX
+    COL 2: ignored
+    COL 3: diagnósticos (arriba) + indicaciones (abajo)
+    COL 4: labs/studies/procedures/cultures (5th column)
+    COL 5: signos vitales (6th column)
+    Returns dict or raises ValueError if a suspected tratante was placed in name slot.
+    """
     if not any(c.strip() for c in cells):
         return None
+    # Pad to 6 cells
+    while len(cells) < 6:
+        cells.append("")
 
-    # Identify the "clinical bulk" cell: highest classification keyword count
-    scores = [(i, _cell_classification_score(c)) for i, c in enumerate(cells)]
-    scores.sort(key=lambda t: -t[1])
-    clinical_idx = scores[0][0] if scores and scores[0][1] > 0 else -1
-    clinical_text = cells[clinical_idx] if clinical_idx >= 0 else ""
-
-    # The rest of the cells contain identity + dx + surgery + antecedents
-    identity_cells = [c for i, c in enumerate(cells) if i != clinical_idx and c.strip()]
-    identity_text = "\n".join(identity_cells)
-
-    # ---- Extract patient fixed fields ----
     p: dict = {}
 
-    # Name: first sequence of ≥2 uppercase words in the first cell (usually)
-    name = None
-    for c in identity_cells:
-        m = _NAME_RE.search(c)
+    # ---- COL 0: bed + attending + residents ----
+    col0_lines = [ln.strip() for ln in cells[0].split("\n") if ln.strip()]
+    if col0_lines:
+        m = _BED_RE.search(col0_lines[0])
         if m:
-            name = m.group(0).strip()
-            break
-    if not name:
+            p["bed"] = m.group(1).upper()
+        if len(col0_lines) >= 2:
+            att = col0_lines[1].strip()
+            # Normalize: "APELLIDO DR" or "APELLIDO DRA" is the attending
+            p["attending_physician"] = att
+
+    # ---- COL 1: name + age + DEIH + DPQX ----
+    col1_lines = [ln.strip() for ln in cells[1].split("\n") if ln.strip()]
+    if not col1_lines:
         return None
-    p["name"] = name
+    raw_name = col1_lines[0].strip()
+    # VALIDATION: name must NOT end with DR/DRA/DR./DRA. (alignment lost)
+    if _re.search(r"\bDRA?\.?\s*$", raw_name, _re.IGNORECASE):
+        raise ValueError(
+            f"Alineamiento de columnas perdido: nombre '{raw_name}' termina en DR/DRA. Se cancela la importación."
+        )
+    p["name"] = raw_name
 
-    # Age
-    m = _AGE_RE.search(identity_text)
-    if m:
-        try: p["age"] = int(m.group(1))
-        except Exception: pass
-
-    # Sex
-    m = _SEX_RE.search(identity_text)
-    if m:
-        v = m.group(1).lower()
-        p["sex"] = "M" if v.startswith(("m", "h")) else "F"
-
-    # Bed
-    m = _BED_RE.search(identity_text)
-    if m:
-        p["bed"] = m.group(1).upper()
-
-    # Attending physician (explicit "Tratante:" first, then loose "Dr. X")
-    m = _ATTENDING_RE.search(identity_text)
-    if m:
-        p["attending_physician"] = m.group(1).strip()
-    else:
-        m = _ATTENDING_LOOSE_RE.search(identity_text)
+    if len(col1_lines) >= 2:
+        m = _re.search(r"\b(\d{1,3})\b", col1_lines[1])
         if m:
-            p["attending_physician"] = m.group(1).strip()
+            try: p["age"] = int(m.group(1))
+            except Exception: pass
 
-    # Allergies / Meds / APP / Oncologic
-    m = _ALLERGY_RE.search(identity_text)
-    if m: p["allergies"] = m.group(1).strip()
-    m = _MEDS_RE.search(identity_text)
-    if m: p["important_medications"] = m.group(1).strip()
-    m = _APP_RE.search(identity_text)
-    if m: p["medical_history"] = m.group(1).strip()
-    m = _ONCO_RE.search(identity_text)
-    if m: p["oncology_status"] = m.group(1).strip()
+    # DEIH / DPQX in col 1 remaining lines (not stored on patient, calculated from dates elsewhere)
 
-    # Unit classification
-    m = _UTI_RE.search(identity_text)
-    p["unit_classification"] = m.group(1).upper() if m else "Piso"
+    # ---- COL 2: ignored ----
 
-    # is_pending_discharge / is_surgical
-    p["is_pending_discharge"] = bool(_PENDING_DISCHARGE_RE.search(identity_text))
-    # Surgical: any procedure keyword indicating surgery in identity/clinical text
-    surg_hint = _re.search(r"\b(cirug[íi]a|POP|postquir|apendicectom|colecistectom|laparoscop|laparotom)", identity_text, _re.IGNORECASE)
-    p["is_surgical"] = bool(surg_hint) or any(
-        _re.search(r"\b(cirug[íi]a|POP|postquir)", c, _re.IGNORECASE) for c in identity_cells
-    )
+    # ---- COL 3: dx + indicaciones ----
+    col3_text = cells[3].strip()
+    if col3_text:
+        # Heuristic split: everything up to a blank line or up to a line containing
+        # "Indicaciones" is dx. Rest is indications.
+        parts = _re.split(r"\n\s*(?:Indicaciones?|Ind\.|INDICACIONES)\s*[:\-]?\s*\n", col3_text, maxsplit=1, flags=_re.IGNORECASE)
+        dx_text = parts[0].strip()
+        ind_text = parts[1].strip() if len(parts) > 1 else ""
+        if not ind_text:
+            # If no explicit "Indicaciones" header, take first paragraph as dx, rest as indications
+            paragraphs = [pp.strip() for pp in _re.split(r"\n\s*\n", col3_text) if pp.strip()]
+            if len(paragraphs) >= 2:
+                dx_text = paragraphs[0]
+                ind_text = "\n\n".join(paragraphs[1:])
+        # Filter out any accidental imaging/lab/proc/culture lines from dx
+        dx_clean = [
+            ln for ln in dx_text.split("\n")
+            if ln.strip() and _cell_classification_score(ln) == 0
+        ]
+        if dx_clean:
+            p["dx_short"] = dx_clean[0][:200]
+            p["dx_full"] = "\n".join(dx_clean)[:2000]
+        if ind_text:
+            p["_indications_text"] = ind_text  # ephemeral, used to diff later
 
-    # Dates
-    dates_found = [_iso_date(c) for c in identity_cells]
-    dates_found = [d for d in dates_found if d]
-    if dates_found:
-        dates_found.sort()
-        p["admission_date"] = dates_found[0]
-        if len(dates_found) > 1:
-            p["surgery_date"] = dates_found[-1]
-
-    # dx_short / dx_full: identity cells that are NOT the name cell and NOT clinical bulk.
-    # dx_short = first short line that isn't the name
-    dx_lines: list[str] = []
-    for c in identity_cells:
-        # Skip the cell that contains the name (usually the first identity cell)
-        if name in c:
-            # Remove name from that cell and use the rest
-            rest = c.replace(name, "").strip()
-            if rest:
-                dx_lines.append(rest)
-        else:
-            dx_lines.append(c)
-    combined_dx = "\n".join(dx_lines).strip()
-
-    # Clean out lines that clearly look like labs/imaging/procedures/cultures accidentally in identity
-    _META_PATTERNS = (
-        _AGE_RE, _BED_RE,
-        _re.compile(r"^\s*(?:M|F|Masculino|Femenino|Hombre|Mujer)\s*$", _re.IGNORECASE),
-        _re.compile(r"^\s*Tratante\s*[:\-].*", _re.IGNORECASE),
-        _re.compile(r"^\s*(?:Alergias?|APNP|APP|Antecedentes|Medicamentos?|Meds?)\s*[:\-].*", _re.IGNORECASE),
-        _re.compile(r"^\s*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\s*$"),  # bare date lines
-    )
-    kept: list[str] = []
-    for line in combined_dx.split("\n"):
-        s = line.strip()
-        if not s:
-            continue
-        if _cell_classification_score(s) > 0:
-            continue  # skip: it's really a clinical line
-        # Skip if the line is JUST meta (age/sex/bed/tratante/allergies/meds/date alone)
-        is_meta = False
-        for pat in _META_PATTERNS:
-            if pat.fullmatch(s) or (pat.search(s) and len(s) < 30 and (_AGE_RE.search(s) or _BED_RE.search(s))):
-                is_meta = True
-                break
-        # Extra guard: if the whole line is just "62 años M" or "S81 62 años" etc.
-        if _AGE_RE.search(s) and (_SEX_RE.search(s) or _BED_RE.search(s)) and len(s) < 40:
-            is_meta = True
-        if is_meta:
-            continue
-        # Also skip a line if it is exactly the patient name
-        if name and s.upper() == name.upper():
-            continue
-        kept.append(s)
-    if kept:
-        p["dx_short"] = kept[0][:200]
-        p["dx_full"] = "\n".join(kept)[:2000]
-
-    # ---- Classify column 5 (clinical bulk) into daily entry buckets ----
-    if clinical_text:
-        buckets = _classify_col5_text(clinical_text)
+    # ---- COL 4: labs/studies/procedures/cultures ----
+    col4 = cells[4].strip()
+    if col4:
+        buckets = _classify_col5_text(col4)
         p["labs"] = buckets["labs"]
         p["studies"] = buckets["studies"]
         p["procedures"] = buckets["procedures"]
@@ -963,8 +910,17 @@ def _parse_row_deterministic(cells: list[str]) -> Optional[dict]:
         if buckets["events"]:
             p["events"] = buckets["events"]
 
-    return p
+    # ---- COL 5: vital signs ----
+    col5 = cells[5].strip()
+    if col5:
+        p["vital_signs"] = col5
 
+    # Metadata inferences
+    p["unit_classification"] = "Piso"
+    p["is_surgical"] = True  # default; user can flip manually
+    p["is_pending_discharge"] = False
+
+    return p
 
 def _parse_censo_docx_deterministic(content: bytes) -> list[dict]:
     """Parse .docx census PURELY with python-docx + regex. NO GPT calls."""
@@ -1062,6 +1018,15 @@ async def _run_import_job(job_id: str, content_bytes: bytes, user_id: str, confi
         errors: list[str] = []
         try:
             parsed = _parse_censo_docx_deterministic(content_bytes)
+        except ValueError as e:
+            # Alignment error → abort entire import per user spec
+            logger.error("Alignment error for job %s: %s", job_id, e)
+            IMPORT_JOBS[job_id] = {
+                **IMPORT_JOBS[job_id],
+                "status": "failed",
+                "error": f"{str(e)} No se creó ni actualizó ningún paciente.",
+            }
+            return
         except Exception as e:
             logger.exception("Deterministic parsing failed for job %s", job_id)
             IMPORT_JOBS[job_id] = {
@@ -1077,6 +1042,17 @@ async def _run_import_job(job_id: str, content_bytes: bytes, user_id: str, confi
                 "error": "No se detectaron tablas de pacientes en el .docx.",
             }
             return
+
+        # Safety: even if _parse_row_deterministic missed it, double-check no name is a tratante
+        for row in parsed:
+            n = row.get("name", "")
+            if _re.search(r"\bDRA?\.?\s*$", n, _re.IGNORECASE):
+                IMPORT_JOBS[job_id] = {
+                    **IMPORT_JOBS[job_id],
+                    "status": "failed",
+                    "error": f"Alineamiento de columnas perdido en la fila '{n}'. Importación cancelada.",
+                }
+                return
 
         existing = await db.patients.find({"user_id": user_id, "active": True}, {"_id": 0}).to_list(2000)
         name_to_patient = {_norm_name(p["name"]): p for p in existing}
@@ -1218,14 +1194,52 @@ async def _run_import_job(job_id: str, content_bytes: bytes, user_id: str, confi
 
 
 async def _upsert_daily_from_censo(patient_id: str, user_id: str, target_date: str, entry: dict):
-    """Merge labs/studies/procedures/cultures/events from a census row into the day's daily_entry (append, don't overwrite)."""
+    """Merge labs/studies/procedures/cultures/vital_signs/indications from a census row.
+    Non-destructive: appends without duplicating. Diffs indications against previous stored text."""
     labs = entry.get("labs")
     studies = entry.get("studies")
     procedures = entry.get("procedures")
     cultures = entry.get("cultures")
+    vitals = entry.get("vital_signs")
     events = entry.get("events")
-    if not any([labs, studies, procedures, cultures, events]):
+    new_ind = entry.get("_indications_text", "")
+    if not any([labs, studies, procedures, cultures, vitals, events, new_ind]):
         return
+
+    # Compute indications changes vs previously stored
+    ind_changes = ""
+    if new_ind:
+        # Find most recent daily_entry with any indications_changes stored (or any daily) as reference
+        prev_cur = db.daily_entries.find(
+            {"patient_id": patient_id, "user_id": user_id, "date": {"$lt": target_date}},
+            {"_id": 0},
+        )
+        prev_list = await prev_cur.to_list(30)
+        prev_list.sort(key=lambda x: x.get("date", ""), reverse=True)
+        prev_ind = ""
+        # Store new_ind as raw on patient for future comparison
+        # Compute simple line-diff: lines in new not in prev
+        prev_patient = await db.patients.find_one(
+            {"id": patient_id, "user_id": user_id}, {"_id": 0}
+        )
+        if prev_patient:
+            prev_ind = (prev_patient.get("last_indications_text") or "").strip()
+        new_lines = [ln.strip() for ln in new_ind.split("\n") if ln.strip()]
+        prev_set = {ln.strip().lower() for ln in prev_ind.split("\n") if ln.strip()}
+        added = [ln for ln in new_lines if ln.lower() not in prev_set]
+        removed = [ln for ln in prev_ind.split("\n") if ln.strip() and ln.strip().lower() not in {n.lower() for n in new_lines}]
+        chunks = []
+        if added:
+            chunks.append("Agregado / modificado:\n- " + "\n- ".join(added))
+        if removed:
+            chunks.append("Suspendido / retirado:\n- " + "\n- ".join(removed))
+        ind_changes = "\n\n".join(chunks) if (added or removed) else ""
+        # Store new indications baseline on the patient
+        await db.patients.update_one(
+            {"id": patient_id, "user_id": user_id},
+            {"$set": {"last_indications_text": new_ind, "updated_at": now_utc().isoformat()}},
+        )
+
     existing = await db.daily_entries.find_one(
         {"patient_id": patient_id, "user_id": user_id, "date": target_date}
     )
@@ -1235,6 +1249,8 @@ async def _upsert_daily_from_censo(patient_id: str, user_id: str, target_date: s
             patient_id=patient_id, user_id=user_id, date=target_date,
             labs=labs or "", studies=studies or "",
             procedures=procedures or "", cultures=cultures or "",
+            vital_signs=vitals or "",
+            indications_changes=ind_changes or "",
             events=events or "",
         )
         await db.daily_entries.insert_one(de.model_dump())
@@ -1242,7 +1258,8 @@ async def _upsert_daily_from_censo(patient_id: str, user_id: str, target_date: s
     update = {"updated_at": now_iso}
     for field, val in (
         ("labs", labs), ("studies", studies), ("procedures", procedures),
-        ("cultures", cultures), ("events", events),
+        ("cultures", cultures), ("vital_signs", vitals),
+        ("indications_changes", ind_changes), ("events", events),
     ):
         if not val:
             continue
