@@ -41,9 +41,10 @@ export const api = {
     form.append("file", file, file.name);
     return client.post("/patients/import-censo", form, {
       headers: { "Content-Type": "multipart/form-data" },
-      timeout: 180000,
+      timeout: 60000,
     }).then((r) => r.data);
   },
+  importCensoStatus: (jobId) => client.get(`/patients/import-censo/status/${jobId}`).then((r) => r.data),
 
   listEntries: (id) => client.get(`/patients/${id}/entries`).then((r) => r.data),
   getTodayEntry: (id) => client.get(`/patients/${id}/entries/today`).then((r) => r.data),

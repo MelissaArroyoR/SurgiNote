@@ -273,10 +273,19 @@ export default function PatientDetail() {
         <button
           data-testid="btn-generate-pase"
           onClick={doGeneratePase}
-          disabled={generatingPase}
+          disabled={generatingPase || generatingNoChanges}
           className="w-full h-14 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-base flex items-center justify-center gap-2 transition-colors active:scale-[0.98] disabled:opacity-60"
         >
           {generatingPase ? "Generando resumen…" : <><Sparkles className="w-5 h-5" /> Guardar al Pase</>}
+        </button>
+
+        <button
+          data-testid="btn-no-changes"
+          onClick={doGenerateNoChanges}
+          disabled={generatingPase || generatingNoChanges}
+          className="w-full h-12 mt-3 rounded-xl border border-emerald-500/50 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-heading font-semibold text-sm flex items-center justify-center gap-2 transition-colors active:scale-[0.98] disabled:opacity-60"
+        >
+          {generatingNoChanges ? "Generando (sin dictado)…" : <><Zap className="w-4 h-4" /> ✨ Paciente sin cambios · Generar todo</>}
         </button>
 
         {pase && (

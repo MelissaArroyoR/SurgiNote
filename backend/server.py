@@ -2,6 +2,7 @@
 import os
 import io
 import uuid
+import asyncio
 import logging
 from pathlib import Path
 from datetime import datetime, timezone, date, timedelta
@@ -730,8 +731,13 @@ def _norm_name(s: str) -> str:
     return " ".join(s.lower().strip().split())
 
 
+# In-memory job store for async .docx imports (per-process, sufficient for single-user app)
+IMPORT_JOBS: dict[str, dict] = {}
+
+
 @api.post("/patients/import-censo")
 async def import_censo(file: UploadFile = File(...), user: dict = Depends(get_user)):
+    """Kick off async census import job. Returns job_id immediately to avoid gateway timeout."""
     filename = (file.filename or "").lower()
     if not filename.endswith(".docx"):
         raise HTTPException(status_code=400, detail="El archivo debe ser un .docx")
@@ -745,78 +751,127 @@ async def import_censo(file: UploadFile = File(...), user: dict = Depends(get_us
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"No se pudo leer el .docx: {e}")
 
-    errors: list[str] = []
-    try:
-        parsed = await _parse_censo_with_gpt(raw_text)
-    except HTTPException as e:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al analizar el censo con IA: {e}")
-
-    # Fetch current active patients
-    existing = await db.patients.find({"user_id": user["id"], "active": True}, {"_id": 0}).to_list(2000)
-    name_to_patient = {_norm_name(p["name"]): p for p in existing}
-    seen_names: set[str] = set()
-
-    new_ones: list[dict] = []
-    updated_ones: list[dict] = []
-
-    for entry in parsed:
-        if not isinstance(entry, dict):
-            errors.append(f"Registro inválido (no es objeto): {entry}")
-            continue
-        name = (entry.get("name") or "").strip()
-        if not name:
-            errors.append("Registro sin nombre — omitido.")
-            continue
-        key = _norm_name(name)
-        seen_names.add(key)
-        # Filter to only known fields
-        payload = {k: entry.get(k) for k in CENSO_FIELDS if entry.get(k) not in (None, "")}
-        # Age coercion
-        if "age" in payload:
-            try:
-                payload["age"] = int(payload["age"])
-            except Exception:
-                payload.pop("age", None)
-
-        prev = name_to_patient.get(key)
-        if prev:
-            # Update only fixed info: overwrite fields present in new payload
-            update = {k: v for k, v in payload.items() if v not in (None, "")}
-            if update:
-                update["updated_at"] = now_utc().isoformat()
-                await db.patients.update_one({"id": prev["id"], "user_id": user["id"]}, {"$set": update})
-                merged = {**prev, **update}
-                updated_ones.append({"id": prev["id"], "name": merged["name"]})
-        else:
-            # Create new
-            new_patient = Patient(
-                user_id=user["id"],
-                name=name,
-                is_new_admission=True,
-                **{k: v for k, v in payload.items() if k != "name"},
-            )
-            await db.patients.insert_one(new_patient.model_dump())
-            new_ones.append({"id": new_patient.id, "name": new_patient.name})
-
-    # Move missing (existing not in new census) to discharged
-    discharged_ones: list[dict] = []
-    for key, p in name_to_patient.items():
-        if key not in seen_names:
-            await db.patients.update_one(
-                {"id": p["id"], "user_id": user["id"]},
-                {"$set": {"active": False, "discharged_at": today_iso(), "updated_at": now_utc().isoformat()}},
-            )
-            discharged_ones.append({"id": p["id"], "name": p["name"]})
-
-    return {
-        "new": new_ones,
-        "updated": updated_ones,
-        "discharged": discharged_ones,
-        "errors": errors,
-        "parsed_count": len(parsed),
+    job_id = str(uuid.uuid4())
+    IMPORT_JOBS[job_id] = {
+        "status": "running",
+        "user_id": user["id"],
+        "started_at": now_utc().isoformat(),
+        "result": None,
+        "error": None,
     }
+    # Fire-and-forget background task
+    asyncio.create_task(_run_import_job(job_id, raw_text, user["id"]))
+    return {"job_id": job_id, "status": "running"}
+
+
+@api.get("/patients/import-censo/status/{job_id}")
+async def import_censo_status(job_id: str, user: dict = Depends(get_user)):
+    job = IMPORT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Trabajo no encontrado")
+    if job["user_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    return {
+        "status": job["status"],
+        "result": job.get("result"),
+        "error": job.get("error"),
+        "started_at": job.get("started_at"),
+    }
+
+
+async def _run_import_job(job_id: str, raw_text: str, user_id: str):
+    """Background task that parses the census with GPT and upserts patients."""
+    try:
+        errors: list[str] = []
+        try:
+            parsed = await _parse_censo_with_gpt(raw_text)
+        except Exception as e:
+            logger.exception("GPT parsing failed for job %s", job_id)
+            IMPORT_JOBS[job_id] = {
+                **IMPORT_JOBS[job_id],
+                "status": "failed",
+                "error": f"Error al analizar el censo con IA: {str(e)[:300]}",
+            }
+            return
+
+        existing = await db.patients.find({"user_id": user_id, "active": True}, {"_id": 0}).to_list(2000)
+        name_to_patient = {_norm_name(p["name"]): p for p in existing}
+        seen_names: set[str] = set()
+
+        new_ones: list[dict] = []
+        updated_ones: list[dict] = []
+
+        for entry in parsed:
+            try:
+                if not isinstance(entry, dict):
+                    errors.append(f"Registro inválido (no es objeto): {str(entry)[:80]}")
+                    continue
+                name = (entry.get("name") or "").strip()
+                if not name:
+                    errors.append("Registro sin nombre — omitido.")
+                    continue
+                key = _norm_name(name)
+                seen_names.add(key)
+                payload = {k: entry.get(k) for k in CENSO_FIELDS if entry.get(k) not in (None, "")}
+                if "age" in payload:
+                    try:
+                        payload["age"] = int(payload["age"])
+                    except Exception:
+                        payload.pop("age", None)
+
+                prev = name_to_patient.get(key)
+                if prev:
+                    update = {k: v for k, v in payload.items() if v not in (None, "")}
+                    if update:
+                        update["updated_at"] = now_utc().isoformat()
+                        await db.patients.update_one(
+                            {"id": prev["id"], "user_id": user_id}, {"$set": update}
+                        )
+                        merged = {**prev, **update}
+                        updated_ones.append({"id": prev["id"], "name": merged["name"]})
+                else:
+                    new_patient = Patient(
+                        user_id=user_id,
+                        name=name,
+                        is_new_admission=True,
+                        **{k: v for k, v in payload.items() if k != "name"},
+                    )
+                    await db.patients.insert_one(new_patient.model_dump())
+                    new_ones.append({"id": new_patient.id, "name": new_patient.name})
+            except Exception as e:
+                logger.exception("Failed processing entry %s", entry)
+                errors.append(f"Error procesando '{entry.get('name', '?')}': {str(e)[:120]}")
+
+        discharged_ones: list[dict] = []
+        for key, p in name_to_patient.items():
+            if key not in seen_names:
+                try:
+                    await db.patients.update_one(
+                        {"id": p["id"], "user_id": user_id},
+                        {"$set": {"active": False, "discharged_at": today_iso(), "updated_at": now_utc().isoformat()}},
+                    )
+                    discharged_ones.append({"id": p["id"], "name": p["name"]})
+                except Exception as e:
+                    errors.append(f"Error al mover a egresados '{p.get('name')}': {str(e)[:120]}")
+
+        IMPORT_JOBS[job_id] = {
+            **IMPORT_JOBS[job_id],
+            "status": "done",
+            "result": {
+                "new": new_ones,
+                "updated": updated_ones,
+                "discharged": discharged_ones,
+                "errors": errors,
+                "parsed_count": len(parsed),
+            },
+        }
+    except Exception as e:
+        logger.exception("Import job %s crashed", job_id)
+        IMPORT_JOBS[job_id] = {
+            **IMPORT_JOBS[job_id],
+            "status": "failed",
+            "error": f"Error inesperado: {str(e)[:300]}",
+        }
 
 
 # ---------------- Paciente sin cambios ----------------

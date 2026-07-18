@@ -29,13 +29,40 @@ export default function ImportCensoDialog({ open, onOpenChange, onFinished }) {
     setLoading(true);
     setResult(null);
     try {
-      const data = await api.importCenso(file);
-      setResult(data);
-      toast.success("Censo actualizado");
-      onFinished?.();
+      const { job_id } = await api.importCenso(file);
+      // Poll status every 3s until done or failed (max ~4 min)
+      let attempts = 0;
+      const maxAttempts = 80;
+      const poll = async () => {
+        attempts += 1;
+        try {
+          const st = await api.importCensoStatus(job_id);
+          if (st.status === "done") {
+            setResult(st.result);
+            toast.success("Censo actualizado");
+            onFinished?.();
+            setLoading(false);
+            return;
+          }
+          if (st.status === "failed") {
+            toast.error(st.error || "Error al procesar el censo");
+            setLoading(false);
+            return;
+          }
+          if (attempts >= maxAttempts) {
+            toast.error("El procesamiento tardó demasiado. Intenta con un censo más pequeño.");
+            setLoading(false);
+            return;
+          }
+          setTimeout(poll, 3000);
+        } catch (e) {
+          toast.error(e?.response?.data?.detail || "Error consultando estado");
+          setLoading(false);
+        }
+      };
+      setTimeout(poll, 2500);
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Error al importar el censo");
-    } finally {
       setLoading(false);
     }
   };
