@@ -11,8 +11,8 @@ export default function Login() {
   const { login, register } = useAuth();
   const nav = useNavigate();
   const [mode, setMode] = useState("login");
-  const [email, setEmail] = useState("demo@surginote.app");
-  const [password, setPassword] = useState("DemoSurgi2026!");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
 

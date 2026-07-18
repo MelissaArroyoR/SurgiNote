@@ -17,6 +17,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from openai import AsyncOpenAI
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from emergentintegrations.llm.openai import OpenAISpeechToText
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -388,32 +389,51 @@ INFORMACIÓN DEL DÍA ({target}):
 - Eventos del día: {today_entry.get('events', '')}
 {prev_labs_block}
 
-Genera un RESUMEN ESTRUCTURADO PARA EL PASE DE VISITA con las siguientes secciones (texto plano, sin markdown):
+Genera un RESUMEN ESTRUCTURADO PARA EL PASE DE VISITA en texto plano (sin markdown), siguiendo EXACTAMENTE esta estructura:
 
 ▎ {patient.get('name','')}  |  Cama {patient.get('bed','ND')} · Piso {patient.get('floor','ND')}
 ▎ DEA: {dea} · DPQ: {dpq}
 
 DX: (diagnóstico resumido)
 QX: (procedimiento y fecha)
-APP RELEVANTES: (antecedentes en 1 línea)
-ONCOLÓGICO: (si aplica, en 1 línea; si no, omite la línea)
-INTERCONSULTAS ACTIVAS: (lista breve)
+APP RELEVANTES: (antecedentes en 1 línea; si no hay, omite)
+ONCOLÓGICO: (si aplica; si no, omite la línea completa)
+INTERCONSULTAS ACTIVAS: (lista breve; si no hay, omite)
 
-CAMBIOS DEL DÍA:
-- (bullets concisos con los cambios clínicos más importantes)
+RESUMEN CLÍNICO DEL DÍA:
+- (2-4 bullets con los eventos y cambios clínicamente más relevantes del día)
 
-COMPARACIÓN DE LABS vs DÍA PREVIO:
-- (compara valores clave: Hb, leucocitos, plaquetas, creatinina, urea, electrolitos, glucosa, PCR, procalcitonina, etc. Indica tendencia con ↑↓→ y magnitud. Si no hay previos, resume solo los actuales.)
+CAMBIOS DE MEDICAMENTOS:
+- (solo si se mencionaron; escalada/desescalada de antibióticos, ajustes de analgesia, anticoagulación, etc. Si no hay cambios, escribe "Sin cambios en el esquema.")
 
-ESTUDIOS/PROCEDIMIENTOS:
-- (resumen conciso)
+ESTUDIOS / PROCEDIMIENTOS:
+- (resumen conciso de imágenes o procedimientos; si no hay, escribe "Ninguno.")
+
+POR SISTEMAS: (INCLUYE esta sección SOLO si el paciente está en UTI, UTIM o con múltiples sistemas comprometidos. Si es piso general y estable, OMITE esta sección completa)
+- Neurológico: ...
+- Respiratorio: ...
+- Hemodinámico: ...
+- Renal / metabólico: ...
+- Gastrointestinal / nutricional: ...
+- Infeccioso: ...
+- Hematológico: ...
+
+CAMBIOS RELEVANTES EN LABORATORIOS:
+- (NO copies valores completos. Identifica SOLO tendencias clínicamente relevantes comparando vs día previo cuando exista. Ejemplos del estilo requerido: "Leucocitos en descenso (14 → 9.8 mil, mejoría)", "Creatinina estable", "Hipokalemia corregida (3.1 → 4.0)", "PCR en aumento (45 → 78)", "Hb estable sin datos de sangrado". Si no hay previos, indica solo los valores actuales anormales; los normales se omiten o mencionas "Sin alteraciones relevantes".)
+
+⚡ SUGERENCIA DE IA — PLAN SUGERIDO:
+- (2-5 bullets con propuestas concretas de manejo basadas en la información disponible. Formato claro y accionable. Al final agrega la línea: "— Requiere validación del médico responsable —")
 
 PENDIENTES / A DISCUTIR:
-- (puntos clave para el pase)
+- (puntos concretos para conversar en el pase; interconsultas pendientes, definiciones, estudios por solicitar)
 
-Sé conciso, clínico y directo. Español médico. No inventes datos."""
+Reglas estrictas:
+1. NO inventes datos. Si algo no está en la información entregada, escribe "ND" o omite la línea.
+2. Toda propuesta terapéutica debe ir SOLO bajo la sección "⚡ SUGERENCIA DE IA".
+3. El resto de secciones deben ser factuales, extraídas exclusivamente del dictado/labs/estudios/eventos.
+4. Español médico. Terminología precisa. Sin adornos ni saludos."""
 
-    system = "Eres un asistente experto para un residente de cirugía general. Organizas y resumes información clínica proporcionada por el usuario. NO inventas datos. Si algo no está, escribes 'ND' o omites la línea. Nunca sustituyes el juicio clínico."
+    system = "Eres un asistente experto para un residente de cirugía general. Organizas y resumes información clínica proporcionada por el usuario. NO inventas datos clínicos ni sustituyes el juicio médico. Las propuestas terapéuticas van únicamente bajo la etiqueta 'SUGERENCIA DE IA'. El resto es organización factual de lo que el usuario dictó."
     text = await llm_generate(system, user_prompt)
 
     await db.daily_entries.update_one(
@@ -444,38 +464,55 @@ INFORMACIÓN DEL DÍA ({target}):
 - Estudios: {entry.get('studies', '')}
 - Eventos: {entry.get('events', '')}
 
-Redacta una NOTA DE EVOLUCIÓN completa y profesional en formato SOAP, español clínico:
+Redacta una NOTA DE EVOLUCIÓN completa en español clínico, LISTA PARA COPIAR Y PEGAR EN MEDSYS, siguiendo EXACTAMENTE este formato en texto plano (sin markdown, sin asteriscos, sin comillas extra):
 
 NOTA DE EVOLUCIÓN — {target}
-Paciente: (nombre, edad, sexo)
-Cama: (cama · piso)
-DEA/DPQ: (días de estancia · días postquirúrgicos)
+Servicio: Cirugía General
 
-Diagnósticos:
-1. (dx resumido)
+ENCABEZADO
+Paciente: (nombre completo, edad, sexo)
+Cama / Piso: (cama · piso)
+Días de estancia: (DEA) | Días postoperatorios: (DPQ)
+Diagnóstico: (dx resumido)
+Cirugía: (fecha · procedimiento realizado)
+Antecedentes relevantes: (una línea; si no hay, escribe "Sin antecedentes de relevancia")
+Interconsultas activas: (lista; si no hay, escribe "Ninguna")
 
-Antecedentes relevantes: (una línea)
+EVOLUCIÓN
+(2-4 párrafos redactados con base en el dictado. Incluye lo subjetivo, lo objetivo del día, cambios de manejo, eventos relevantes, respuesta al tratamiento, comportamiento hemodinámico, ventilatorio, dolor, tolerancia a la vía oral, drenajes, herida quirúrgica cuando aplique.)
 
-Procedimiento quirúrgico: (fecha · procedimiento · hallazgos)
+EXPLORACIÓN FÍSICA
+Signos vitales: (TA, FC, FR, T, SatO2 — solo si están en el dictado; si no, "ND")
+Estado general: (impresión clínica según dictado)
+Cabeza y cuello: (según dictado; si no, "sin alteraciones referidas")
+Cardiopulmonar: (según dictado)
+Abdomen: (según dictado — herida, ruidos, dolor, drenajes)
+Extremidades: (según dictado)
+Neurológico: (según dictado)
 
-S (Subjetivo): (basado en el dictado)
+LABORATORIOS Y ESTUDIOS
+Laboratorios del día: (organiza los valores del día en línea)
+Cambios relevantes: (bullets con las tendencias clínicamente importantes vs previos si el dictado los menciona)
+Estudios / procedimientos: (resumen; si no hay, "Sin estudios el día de hoy")
 
-O (Objetivo):
-- Signos vitales / exploración (si se dictó)
-- Laboratorios del día
-- Estudios / procedimientos
+PLAN
+1. (plan por problema/sistema, concreto y accionable)
+2. ...
+3. ...
+(Incluye: dieta, líquidos, medicamentos, analgesia, profilaxis, movilización, retiro de dispositivos, curaciones, interconsultas pendientes, estudios pendientes.)
 
-A (Análisis): (impresión clínica breve y razonada, evolución esperada)
+PRONÓSTICO
+(Una línea: reservado / bueno para la función / bueno para la vida — según corresponda clínicamente. Justifica en máximo una frase.)
 
-P (Plan):
-- (plan por sistemas / problemas)
-- (interconsultas pendientes)
-- (estudios pendientes)
+—
+Firma: Residente de Cirugía General
 
-Firma: Cirugía General · Residente
-
-No inventes datos. Usa exactamente la información proporcionada."""
-    system = "Eres experto en redacción de notas médicas de cirugía general en español. Notas SOAP profesionales, precisas, concisas. No inventas datos."
+Reglas estrictas:
+1. NO inventes datos, signos vitales, medicamentos, dosis, ni valores que no estén en el dictado/labs/eventos.
+2. Si un dato no está presente, escribe "ND" o "sin datos referidos".
+3. Español médico profesional.
+4. Formato texto plano sin markdown, listo para copiar y pegar."""
+    system = "Eres experto en redacción de notas médicas de cirugía general en español para el expediente MedSys. Produces notas profesionales, precisas, con formato ENCABEZADO / EVOLUCIÓN / EXPLORACIÓN FÍSICA / LABORATORIOS Y ESTUDIOS / PLAN / PRONÓSTICO. Nunca inventas datos clínicos."
     note = await llm_generate(system, user_prompt)
 
     wa_prompt = f"""Con base en la siguiente información, redacta un MENSAJE BREVE Y PROFESIONAL para WhatsApp al médico tratante:
@@ -532,31 +569,41 @@ async def generate_full_pase(user: dict = Depends(get_user)):
     return {"pase": header + body, "patient_count": len(sections)}
 
 
-_openai_client: Optional[AsyncOpenAI] = None
+_stt_client: Optional[OpenAISpeechToText] = None
 
 
-def get_openai():
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = AsyncOpenAI(
-            api_key=EMERGENT_KEY,
-            base_url="https://integrations.emergentagent.com/llm",
-        )
-    return _openai_client
+def get_stt():
+    global _stt_client
+    if _stt_client is None:
+        _stt_client = OpenAISpeechToText(api_key=EMERGENT_KEY)
+    return _stt_client
 
 
 @api.post("/transcribe")
 async def transcribe(audio: UploadFile = File(...), user: dict = Depends(get_user)):
+    """Real transcription via OpenAI Whisper (routed through Emergent proxy)."""
     try:
         content = await audio.read()
+        if len(content) < 1000:
+            raise HTTPException(status_code=400, detail="Audio demasiado corto")
+        # litellm expects a tuple (filename, bytes, mime) or a file-like object
         filename = audio.filename or "audio.webm"
-        client_ai = get_openai()
-        result = await client_ai.audio.transcriptions.create(
-            model="whisper-1",
+        # Ensure filename has a supported extension for validator
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if ext not in ("mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"):
+            filename = "audio.webm"
+        stt = get_stt()
+        result = await stt.transcribe(
             file=(filename, content, audio.content_type or "audio/webm"),
+            model="whisper-1",
+            response_format="text",
             language="es",
+            prompt="Transcripción médica en español. Terminología de cirugía general, laboratorios, medicamentos.",
         )
-        return {"text": result.text}
+        text = result if isinstance(result, str) else getattr(result, "text", str(result))
+        return {"text": text.strip()}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Transcription failed")
         raise HTTPException(status_code=500, detail=f"Error al transcribir: {str(e)}")
