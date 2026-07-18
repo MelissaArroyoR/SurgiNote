@@ -297,12 +297,12 @@ def _bed_sort_key(bed: Optional[str]):
     if m:
         floor = int(m.group(1))
         num = int(m.group(2))
-        return (-floor, 0, num, b)  # suite = 0 (first within floor)
+        return (-floor, 0, -num, b)  # suite = 0 (first within floor), num DESC
     m = _BED_ROOM_RE.match(b)
     if m:
         floor = int(m.group(1))
         num = int(m.group(2))
-        return (-floor, 1, num, b)  # normal room = 1 (after suites)
+        return (-floor, 1, -num, b)  # normal room = 1 (after suites), num DESC
     return (999, 9, 999999, b)
 
 
@@ -685,21 +685,94 @@ CENSO_DAILY_FIELDS = ["labs", "studies", "procedures", "cultures", "events"]
 
 
 def _extract_docx_text(content: bytes) -> str:
-    """Extract all text from a .docx file (paragraphs + tables)."""
+    """Extract text from .docx preserving TABLE STRUCTURE:
+    each row is emitted as one block, each cell labeled [COL N] with the full
+    multi-paragraph content of the cell. This lets GPT identify the 5th column
+    reliably so it can classify labs / imaging / procedures / cultures.
+    """
     buf = io.BytesIO(content)
     doc = DocxDocument(buf)
-    parts = []
-    # Paragraphs
+    parts: list[str] = []
+    # Paragraphs (headers, notes outside tables)
     for p in doc.paragraphs:
         if p.text.strip():
             parts.append(p.text)
-    # Tables
-    for table in doc.tables:
-        for row in table.rows:
-            row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
-            if row_text:
-                parts.append(row_text)
+    # Tables: preserve column structure
+    for t_idx, table in enumerate(doc.tables):
+        parts.append(f"\n===== TABLA {t_idx + 1} =====")
+        for r_idx, row in enumerate(table.rows):
+            row_has_content = any(c.text.strip() for c in row.cells)
+            if not row_has_content:
+                continue
+            parts.append(f"\n----- FILA {r_idx + 1} -----")
+            for c_idx, cell in enumerate(row.cells):
+                # Preserve internal paragraphs of the cell (line breaks matter for column 5)
+                lines = [p.text for p in cell.paragraphs if p.text.strip()]
+                if not lines:
+                    continue
+                cell_text = "\n".join(lines)
+                parts.append(f"[COL {c_idx + 1}]:\n{cell_text}")
     return "\n".join(parts)
+
+
+# ---------------- Column-5 regex classifier (fallback + reinforcement) ----------------
+_LABS_KW = _re.compile(
+    r"(?:^|\W)(LABS|BH|QS|ES\b|PFH|TP\b|TTP\b|INR|PCR\b|PROCALCITONINA|GASA|GASV|EGO|"
+    r"HB\b|HGB\b|LEU\b|LEUCOCITOS|PLAQUETAS|PLT\b|CREATININA|CR\b|UREA|BUN\b|"
+    r"ELECTROLITOS|NA\b|K\b|CL\b|CA\b|MG\b|GLUCOSA|GLU\b|BT\b|BD\b|BI\b|AST|ALT|"
+    r"ALBUM(INA)?|LDH|CPK|DHL|CK\-?MB|TROPONINA|LIPASA|AMILASA|MARCADORES|CA\s*19|CA\s*125|CEA)\b",
+    _re.IGNORECASE,
+)
+_IMAGING_KW = _re.compile(
+    r"(?:^|\W)(RXTX|RX\b|TAC\b|ANGIOTAC|TC\b|RM\b|RMN\b|USG\b|ULTRASONIDO|"
+    r"PET\-?CT|PET\b|ECG\b|EKG\b|ECOCARDIOGRAMA|SEGD|SERIE\s+ESOFAGOGA|"
+    r"MASTOGRAF|RADIOGRAF|TOMOGRAF|RESONANCIA)\b",
+    _re.IGNORECASE,
+)
+_PROC_KW = _re.compile(
+    r"(?:^|\W)(COLONOSCOPIA|ENDOSCOPIA|RHP\b|HALLAZGOS\s+QUIR|DRENAJES?|PARACENTESIS|"
+    r"TORACOCENTESIS|BIOPSIAS?|CIRUG(I|Í)A|POST[\s\-]?OPERATORIO|POP\b|"
+    r"COLECISTECTOM|APENDICECTOM|LAPAROSCOP|LAPE\b|LAPAROTOM)\b",
+    _re.IGNORECASE,
+)
+_CULT_KW = _re.compile(
+    r"(?:^|\W)(HEMOCULTIVOS?|UROCULTIVOS?|CULTIVOS?|GRAM\b|SUSCEPTIBILIDAD|DESARROLLO|"
+    r"BLEE\b|MICROORGANISMOS?|AISLAMIENTO|ANTIBIOGRAMA)\b",
+    _re.IGNORECASE,
+)
+
+
+def _classify_col5_text(text: str) -> dict:
+    """Split a big text block (usually column 5) into labs/studies/procedures/cultures.
+    Splits by blank-line paragraphs; classifies each paragraph by strongest keyword match.
+    Anything unclassified goes to `events`. Preserves original formatting (no summary).
+    """
+    if not text or not text.strip():
+        return {"labs": "", "studies": "", "procedures": "", "cultures": "", "events": ""}
+    # Split by 2+ newlines OR by lines starting with a date (dd/mm...)
+    raw = text.strip()
+    # First try double-newline split; if it yields only 1 block, split by single newline
+    blocks = [b.strip() for b in _re.split(r"\n\s*\n", raw) if b.strip()]
+    if len(blocks) <= 1:
+        blocks = [b.strip() for b in raw.split("\n") if b.strip()]
+
+    bins = {"labs": [], "studies": [], "procedures": [], "cultures": [], "events": []}
+
+    for block in blocks:
+        scores = {
+            "cultures": len(_CULT_KW.findall(block)),
+            "studies": len(_IMAGING_KW.findall(block)),
+            "procedures": len(_PROC_KW.findall(block)),
+            "labs": len(_LABS_KW.findall(block)),
+        }
+        # cultures wins over labs when tied (cultures is more specific)
+        best = max(scores, key=lambda k: (scores[k], ["events", "labs", "procedures", "studies", "cultures"].index(k)))
+        if scores[best] == 0:
+            bins["events"].append(block)
+        else:
+            bins[best].append(block)
+
+    return {k: "\n\n".join(v) for k, v in bins.items()}
 
 
 async def _parse_censo_with_gpt(raw_text: str) -> list[dict]:
@@ -714,8 +787,36 @@ async def _parse_censo_with_gpt(raw_text: str) -> list[dict]:
     )
     prompt = f"""Del siguiente TEXTO DE CENSO HOSPITALARIO extrae la lista de TODOS los pacientes en el ORDEN EXACTO en que aparecen (preservando la secuencia del documento).
 
-TEXTO DEL CENSO:
-{raw_text}
+FORMATO DEL TEXTO: el texto viene extraído de un .docx. Cuando ves marcadores como
+  ===== TABLA N =====
+  ----- FILA N -----
+  [COL 1]: ...
+  [COL 2]: ...
+  [COL 5]: ...
+significa que provienen de una TABLA. Cada FILA es UN PACIENTE. Las columnas normalmente son:
+  COL 1: Nombre / cama / datos de identificación
+  COL 2: Diagnóstico / dx
+  COL 3: Cirugía / procedimiento principal / hallazgos
+  COL 4: Antecedentes / medicamentos / alergias / tratante
+  COL 5: BLOQUE CLÍNICO HETEROGÉNEO con laboratorios, estudios, procedimientos y cultivos del paciente (fechas subrayadas + valores).
+Si el número de columnas es distinto, el bloque clínico grande (con LABS/GASA/TAC/etc.) suele ser la ÚLTIMA columna.
+
+Ejemplo REAL de la ÚLTIMA columna típica (así viene el texto crudo):
+
+  30/06/2026
+  LABS: BH Hb 10.2 Leu 12.4 Plt 220 · QS Cr 1.1 Urea 42 Glu 130 · ES Na 138 K 3.7
+  GASA: pH 7.36 pCO2 42 HCO3 22
+  EGO: densidad 1.020 leu 8-10 nitritos -
+  01/07/2026
+  TAC abdomen c/c: colección de 6x4 cm en FID adyacente al ciego, sin neumoperitoneo
+  USG hígado: sin lesiones
+  02/07/2026
+  Colonoscopia: pólipo sesil de 8 mm en sigma, resecado. RHP pendiente.
+  03/07/2026
+  Hemocultivo #2: E. coli BLEE (+) sensible a meropenem
+  Gram: bacilos gram (-)
+
+Debes SEPARAR ese bloque en 4 categorías cuando aparezca:
 
 Devuelve un objeto JSON con esta forma exacta:
 {{
@@ -730,10 +831,10 @@ Devuelve un objeto JSON con esta forma exacta:
       "attending_physician": "Dr. Apellido / Dra. Apellido (SOLO médico tratante/adscrito responsable — NUNCA interconsultantes)",
       "admission_date": "YYYY-MM-DD",
       "surgery_date": "YYYY-MM-DD",
-      "dx_short": "Diagnóstico resumido (una línea)",
-      "dx_full": "Diagnóstico completo con detalles",
+      "dx_short": "Diagnóstico resumido (una línea) — SOLO nombre de la enfermedad",
+      "dx_full": "Diagnóstico completo con detalles clínicos — SIN reportes de estudios",
       "surgery_procedure": "Procedimiento quirúrgico realizado",
-      "surgery_findings": "Hallazgos quirúrgicos importantes",
+      "surgery_findings": "Hallazgos quirúrgicos (del acto quirúrgico previo)",
       "medical_history": "Antecedentes personales patológicos relevantes",
       "allergies": "Alergias específicas o 'Ninguna referida'",
       "important_medications": "Medicamentos crónicos importantes",
@@ -742,43 +843,44 @@ Devuelve un objeto JSON con esta forma exacta:
       "unit_classification": "UTI" | "UTIM" | "Piso",
       "is_surgical": true | false,
       "is_pending_discharge": true | false,
-      "labs": "SOLO laboratorios: LABS/BH/QS/ES/PFH/TP/TTP/PCR/procalcitonina/GASA/GASV/EGO/hormonas/marcadores. Copiar el bloque LITERAL sin resumir. Un valor por línea o como venga.",
-      "studies": "SOLO estudios de imagen: RXTX, TAC, ANGIOTAC, RM, USG, PET-CT, ECG, SEGD, MASTOGRAFÍA, RMN, tomografía, ecocardiograma. Copiar el bloque literal.",
-      "procedures": "SOLO procedimientos: colonoscopia, endoscopia, RHP, biopsia, drenaje, paracentesis, toracocentesis, procedimientos varios NO quirúrgicos mayores. Copiar el bloque literal.",
-      "cultures": "SOLO cultivos y microbiología: Cultivos, Gram, Hemocultivos, urocultivos, cultivo herida, susceptibilidad, desarrollo, aislamiento. Copiar el bloque literal.",
-      "events": "Eventos clínicos del día / cambios / notas libres del residente (NO laboratorios, NO estudios, NO procedimientos, NO cultivos)."
+      "labs": "TEXTO ÍNTEGRO de los bloques de LABORATORIOS. Toda fecha que introduzca LABS/BH/QS/ES/PFH/GASA/GASV/EGO va aquí, con su fecha. Copia LITERAL. No resumas.",
+      "studies": "TEXTO ÍNTEGRO de ESTUDIOS DE IMAGEN: RXTX, TAC, ANGIOTAC, RM, RMN, USG, PET-CT, ECG, SEGD, MASTOGRAFÍA, TC, tomografía, ecocardiograma. Con fecha si tiene. LITERAL.",
+      "procedures": "TEXTO ÍNTEGRO de PROCEDIMIENTOS: colonoscopia, endoscopia, RHP, hallazgos quirúrgicos del día, drenajes, paracentesis, biopsias, cirugía. LITERAL.",
+      "cultures": "TEXTO ÍNTEGRO de CULTIVOS: hemocultivos, urocultivos, cultivos, Gram, susceptibilidad, desarrollo, BLEE, microorganismo, aislamiento, antibiograma. LITERAL.",
+      "events": "Sólo lo que NO encaje en las 4 categorías anteriores (comentarios libres, cambios clínicos que no son un estudio)."
     }}
   ]
 }}
 
 Reglas ESTRICTAS:
-1. Extrae UN objeto por cada paciente EN EL MISMO ORDEN que aparecen en el censo. Preserva la secuencia exacta.
-2. Si un campo NO está en el texto → null. NO inventes datos.
+1. Extrae UN objeto por cada FILA de tabla en el MISMO ORDEN. Preserva la secuencia.
+2. Si un campo NO está en el texto → null / "". NO inventes datos.
 3. Fechas SIEMPRE en formato ISO YYYY-MM-DD. Si solo hay día/mes, usa el año actual ({now_utc().year}).
-4. name es OBLIGATORIO. Sin nombre válido, omite ese paciente.
-5. `attending_physician`: SOLO el médico TRATANTE / adscrito responsable del paciente (buscar palabras clave: "Tratante", "Adscrito", "Dr.", "Dra." junto al paciente). NUNCA incluir aquí interconsultantes.
-6. NO extraigas interconsultantes. NO devuelvas el campo "consultants". El usuario los capturará manualmente.
-7. `is_surgical`: true si el paciente tiene procedimiento quirúrgico realizado o programado; false si es paciente no quirúrgico.
-8. `is_pending_discharge`: true si el censo menciona "alta pendiente", "en espera de alta", "alta hoy", "candidato a egreso"; false en cualquier otro caso.
-9. `unit_classification`: "UTI" si Terapia Intensiva; "UTIM" si Terapia Intermedia; "Piso" en cualquier otro caso.
+4. name es OBLIGATORIO. Sin nombre, omite ese paciente.
+5. `attending_physician`: SOLO médico TRATANTE / adscrito responsable. NUNCA interconsultantes.
+6. NO extraigas interconsultantes. NO devuelvas el campo "consultants".
+7. `is_surgical`: true si tiene procedimiento quirúrgico realizado o programado.
+8. `is_pending_discharge`: true si menciona "alta pendiente / hoy / candidato a egreso".
+9. `unit_classification`: "UTI" | "UTIM" | "Piso".
 
-10. RUTEO ESTRICTO DE LA QUINTA COLUMNA CLÍNICA (MUY IMPORTANTE):
-   - LABORATORIOS → SIEMPRE al campo `labs`. Palabras clave: LABS, BH, QS, ES, PFH, TP, TTP, PCR, procalcitonina, GASA, GASV, EGO, marcadores tumorales, hormonas.
-   - ESTUDIOS DE IMAGEN → SIEMPRE al campo `studies`. Palabras clave: RXTX, TAC, ANGIOTAC, RM, RMN, USG, PET-CT, ECG, ECOCARDIOGRAMA, SEGD, MASTOGRAFÍA, tomografía.
-   - PROCEDIMIENTOS → SIEMPRE al campo `procedures`. Palabras clave: colonoscopia, endoscopia, RHP, biopsia, drenaje, paracentesis, toracocentesis, procedimiento X (excepto cirugía mayor que ya está en surgery_procedure).
-   - CULTIVOS → SIEMPRE al campo `cultures`. Palabras clave: Cultivos, Gram, Hemocultivos, urocultivo, cultivo de herida, susceptibilidad, desarrollo, aislamiento.
-   - HALLAZGOS QUIRÚRGICOS → SIEMPRE al campo `surgery_findings`. Palabras clave: Hallazgos, HTQ.
-   - EVENTOS del día / notas libres → al campo `events`.
+10. RUTEO ESTRICTO DE LA QUINTA (o última) COLUMNA — CRÍTICO:
+   - LABORATORIOS (LABS, BH, QS, ES, PFH, TP, TTP, PCR, procalcitonina, GASA, GASV, EGO, marcadores tumorales, hormonas, Hb, leucocitos, plaquetas, Cr, urea, electrolitos, glucosa, PFH, DHL) → SIEMPRE al campo `labs`.
+   - ESTUDIOS DE IMAGEN (RXTX, RX, TAC, ANGIOTAC, TC, RM, RMN, USG, ultrasonido, PET-CT, PET, ECG, EKG, ecocardiograma, SEGD, mastografía, radiografía, tomografía, resonancia) → SIEMPRE al campo `studies`.
+   - PROCEDIMIENTOS (colonoscopia, endoscopia, RHP, hallazgos quirúrgicos del día, drenajes, paracentesis, toracocentesis, biopsias, cirugías secundarias, POP, laparoscopía, laparotomía) → SIEMPRE al campo `procedures`.
+   - CULTIVOS (hemocultivos, urocultivos, cultivos, Gram, susceptibilidad, desarrollo, BLEE, microorganismo, aislamiento, antibiograma) → SIEMPRE al campo `cultures`.
+   - Copia el bloque completo con su fecha. NO resumas, NO reformatees, NO combines.
 
-11. PROHIBICIONES ABSOLUTAS:
-   - `dx_short` y `dx_full` deben contener ÚNICAMENTE diagnósticos médicos (nombre del padecimiento, estadio, complicación diagnóstica).
-   - NUNCA colocar en `dx_short` o `dx_full`: resultados de TAC, USG, RX, RM, colonoscopia, endoscopia, RHP, laboratorios, hallazgos quirúrgicos.
-   - Ejemplo INCORRECTO — `dx_full`: "TAC: engrosamiento…" ❌
-   - Ejemplo CORRECTO — `dx_full`: "Colitis en estudio" ✅  y el resultado del TAC va a `studies`.
-   - NUNCA colocar hallazgos quirúrgicos en `dx_short` ni `dx_full` — van solo en `surgery_findings`.
+11. PROHIBICIONES ABSOLUTAS EN dx_short / dx_full:
+    - Está PROHIBIDO poner: TAC, USG, RX, RM, PET, colonoscopia, endoscopia, RHP, laboratorios, hallazgos quirúrgicos, cultivos.
+    - Ejemplo INCORRECTO — `dx_full`: "TAC: engrosamiento…" ❌ (va a `studies`)
+    - Ejemplo INCORRECTO — `dx_full`: "Colonoscopia: pólipo…" ❌ (va a `procedures`)
+    - Ejemplo CORRECTO — `dx_short`: "Absceso intraabdominal" ✅ + los detalles del TAC en `studies`.
+    - Ejemplo CORRECTO — `dx_short`: "Colitis en estudio" ✅ + resultado del TAC en `studies`.
 
-12. Copia el contenido de cada bloque LITERALMENTE, sin resumir ni reformular. No agregues comentarios.
-13. Devuelve SOLO el JSON, sin ```json``` ni explicaciones."""
+12. Devuelve SOLO el JSON, sin ```json``` ni explicaciones.
+
+TEXTO DEL CENSO (contenido crudo del .docx):
+{raw_text}"""
 
     text = await llm_generate(system, prompt)
     # Strip potential markdown fences
@@ -897,6 +999,52 @@ async def _run_import_job(job_id: str, raw_text: str, user_id: str, confirm: boo
                 if not name:
                     errors.append("Registro sin nombre — omitido.")
                     continue
+
+                # ---- Column-5 safety net: guarantee classification ----
+                # 1) If GPT accidentally dumped clinical bulk into dx_short/dx_full/events,
+                #    or if any of labs/studies/procedures/cultures came empty, run
+                #    the regex classifier on whatever loose text is available.
+                bulk_sources = []
+                for src_key in ("events", "dx_full", "surgery_findings"):
+                    val = entry.get(src_key)
+                    if isinstance(val, str) and val and len(val) > 40:
+                        # Only reclassify if it looks like it has categorical keywords
+                        if (_LABS_KW.search(val) or _IMAGING_KW.search(val)
+                                or _PROC_KW.search(val) or _CULT_KW.search(val)):
+                            bulk_sources.append((src_key, val))
+
+                # Reclassify bulk_sources content into the 4 daily buckets
+                for src_key, val in bulk_sources:
+                    classified = _classify_col5_text(val)
+                    for bucket in ("labs", "studies", "procedures", "cultures"):
+                        added = classified.get(bucket, "")
+                        if not added:
+                            continue
+                        existing = (entry.get(bucket) or "").strip()
+                        if added.strip() not in existing:
+                            entry[bucket] = (existing + "\n" + added).strip() if existing else added
+                    # Remove the bulk from the source: only keep true "events" (non-classifiable)
+                    entry[src_key] = classified.get("events", "").strip() if src_key == "events" else ""
+                    # For dx_full/surgery_findings, keep only what regex could NOT classify (real dx text)
+                    if src_key in ("dx_full", "surgery_findings"):
+                        entry[src_key] = classified.get("events", "").strip()
+
+                # 2) Even if GPT filled labs/studies/etc., re-run classifier ONLY on `events`
+                #    (in case GPT dumped stuff there). This is idempotent.
+                if entry.get("events"):
+                    ev = entry["events"]
+                    if (_LABS_KW.search(ev) or _IMAGING_KW.search(ev)
+                            or _PROC_KW.search(ev) or _CULT_KW.search(ev)):
+                        classified = _classify_col5_text(ev)
+                        for bucket in ("labs", "studies", "procedures", "cultures"):
+                            added = classified.get(bucket, "")
+                            if not added:
+                                continue
+                            existing = (entry.get(bucket) or "").strip()
+                            if added.strip() not in existing:
+                                entry[bucket] = (existing + "\n" + added).strip() if existing else added
+                        entry["events"] = classified.get("events", "").strip()
+
                 key = _norm_name(name)
                 seen_names.add(key)
                 payload = {k: entry.get(k) for k in CENSO_FIELDS if entry.get(k) not in (None, "")}
