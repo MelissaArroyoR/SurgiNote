@@ -43,8 +43,8 @@ module.exports = {
         'accordion-down': { from: { height: '0' }, to: { height: 'var(--radix-accordion-content-height)' } },
         'accordion-up': { from: { height: 'var(--radix-accordion-content-height)' }, to: { height: '0' } },
         'pulse-mic': {
-          '0%,100%': { boxShadow: '0 0 0 0 rgba(245, 158, 11, 0.55)' },
-          '50%': { boxShadow: '0 0 0 22px rgba(245, 158, 11, 0)' },
+          '0%,100%': { boxShadow: '0 0 0 0 rgba(37, 99, 235, 0.5)' },
+          '50%': { boxShadow: '0 0 0 22px rgba(37, 99, 235, 0)' },
         }
       },
       animation: {

@@ -54,10 +54,10 @@ export default function VoiceDictation({ onTranscribed, testid = "btn-voice-dict
       className={[
         "w-20 h-20 rounded-full flex items-center justify-center shadow-lg transition-colors active:scale-95",
         state === "recording"
-          ? "bg-red-500 text-slate-50 animate-pulse-mic"
+          ? "bg-red-500 text-white animate-pulse-mic"
           : state === "processing"
-          ? "bg-slate-700 text-slate-300"
-          : "bg-amber-500 text-slate-950 hover:bg-amber-600",
+          ? "bg-slate-200 text-slate-500"
+          : "bg-blue-600 text-white hover:bg-blue-700",
       ].join(" ")}
       aria-label={state === "recording" ? "Detener dictado" : "Iniciar dictado"}
     >

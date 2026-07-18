@@ -23,12 +23,12 @@ function App() {
       <BrowserRouter>
         <Toaster
           position="top-center"
-          theme="dark"
+          theme="light"
           toastOptions={{
             style: {
-              background: "#1E293B",
-              border: "1px solid #334155",
-              color: "#F8FAFC",
+              background: "#FFFFFF",
+              border: "1px solid #E2E8F0",
+              color: "#0F172A",
               fontFamily: "IBM Plex Sans",
             },
           }}

@@ -75,6 +75,7 @@ class Patient(BaseModel):
     bed: Optional[str] = None
     floor: Optional[str] = None
     service: Optional[str] = None
+    attending_physician: Optional[str] = None
     dx_short: Optional[str] = None
     dx_full: Optional[str] = None
     surgery_date: Optional[str] = None
@@ -86,8 +87,12 @@ class Patient(BaseModel):
     consultants: Optional[str] = None
     oncology_treatment: Optional[str] = None
     oncology_status: Optional[str] = None
-    unit_classification: Optional[str] = None  # UTI / UTIM / Piso
+    unit_classification: Optional[str] = None
     admission_date: Optional[str] = None
+    admission_note_text: Optional[str] = None
+    is_surgical: bool = True
+    is_pending_discharge: bool = False
+    censo_order: Optional[int] = None
     active: bool = True
     is_new_admission: bool = False
     discharged_at: Optional[str] = None
@@ -102,6 +107,7 @@ class PatientCreate(BaseModel):
     bed: Optional[str] = None
     floor: Optional[str] = None
     service: Optional[str] = None
+    attending_physician: Optional[str] = None
     dx_short: Optional[str] = None
     dx_full: Optional[str] = None
     surgery_date: Optional[str] = None
@@ -115,6 +121,8 @@ class PatientCreate(BaseModel):
     oncology_status: Optional[str] = None
     unit_classification: Optional[str] = None
     admission_date: Optional[str] = None
+    is_surgical: Optional[bool] = None
+    is_pending_discharge: Optional[bool] = None
 
 
 class PatientUpdate(BaseModel):
@@ -124,6 +132,7 @@ class PatientUpdate(BaseModel):
     bed: Optional[str] = None
     floor: Optional[str] = None
     service: Optional[str] = None
+    attending_physician: Optional[str] = None
     dx_short: Optional[str] = None
     dx_full: Optional[str] = None
     surgery_date: Optional[str] = None
@@ -139,6 +148,8 @@ class PatientUpdate(BaseModel):
     admission_date: Optional[str] = None
     active: Optional[bool] = None
     is_new_admission: Optional[bool] = None
+    is_surgical: Optional[bool] = None
+    is_pending_discharge: Optional[bool] = None
 
 
 class DailyEntry(BaseModel):
@@ -265,7 +276,13 @@ async def list_patients(user: dict = Depends(get_user)):
     patients = await cur.to_list(500)
     for p in patients:
         enrich_patient(p)
-    patients.sort(key=lambda x: (x.get("floor") or "", x.get("bed") or ""))
+    # Preserve censo order (from last import). Patients without censo_order go to end sorted alphabetically.
+    def _key(p):
+        co = p.get("censo_order")
+        if co is None:
+            return (1, (p.get("name") or "").lower())
+        return (0, co)
+    patients.sort(key=_key)
     return patients
 
 
@@ -624,12 +641,16 @@ async def readmit_patient(patient_id: str, user: dict = Depends(get_user)):
 
 # ---------------- CENSO IMPORT (Word .docx) ----------------
 CENSO_FIELDS = [
-    "name", "age", "sex", "bed", "floor", "service", "admission_date",
+    "name", "age", "sex", "bed", "floor", "service",
+    "attending_physician", "admission_date",
     "surgery_date", "dx_short", "dx_full", "surgery_procedure",
     "surgery_findings", "medical_history", "allergies",
-    "important_medications", "consultants", "oncology_treatment",
+    "important_medications", "oncology_treatment",
     "oncology_status", "unit_classification",
+    "is_surgical", "is_pending_discharge",
 ]
+
+CENSO_DAILY_FIELDS = ["labs", "studies", "events"]
 
 
 def _extract_docx_text(content: bytes) -> str:
@@ -655,9 +676,12 @@ async def _parse_censo_with_gpt(raw_text: str) -> list[dict]:
     system = (
         "Eres un asistente experto en extraer información clínica de censos hospitalarios en español. "
         "Devuelves EXCLUSIVAMENTE JSON válido, sin markdown ni texto adicional. "
-        "Nunca inventas datos: si un campo no está presente, lo omites o lo dejas en null."
+        "Nunca inventas datos: si un campo no está presente, lo omites o lo dejas en null. "
+        "MUY IMPORTANTE: distingues claramente entre el MÉDICO TRATANTE (adscrito responsable del paciente, "
+        "que suele estar destacado como 'Tratante', 'Dr.', 'Adscrito', 'Médico responsable') "
+        "de los INTERCONSULTANTES (que NO debes extraer del censo — quedarán vacíos)."
     )
-    prompt = f"""Del siguiente TEXTO DE CENSO extrae la lista de todos los pacientes.
+    prompt = f"""Del siguiente TEXTO DE CENSO HOSPITALARIO extrae la lista de TODOS los pacientes en el ORDEN EXACTO en que aparecen (preservando la secuencia del documento).
 
 TEXTO DEL CENSO:
 {raw_text}
@@ -672,38 +696,47 @@ Devuelve un objeto JSON con esta forma exacta:
       "bed": "305",
       "floor": "3",
       "service": "Cirugía General",
+      "attending_physician": "Dr. Apellido / Dra. Apellido (SOLO médico tratante/adscrito responsable — NUNCA interconsultantes)",
       "admission_date": "YYYY-MM-DD",
       "surgery_date": "YYYY-MM-DD",
-      "dx_short": "Diagnóstico resumido",
+      "dx_short": "Diagnóstico resumido (una línea)",
       "dx_full": "Diagnóstico completo con detalles",
       "surgery_procedure": "Procedimiento quirúrgico realizado",
-      "surgery_findings": "Hallazgos quirúrgicos",
-      "medical_history": "APP relevantes en una línea",
-      "allergies": "Alergias o 'Ninguna referida'",
-      "important_medications": "Medicamentos importantes/crónicos",
-      "consultants": "Interconsultantes activos separados por coma",
-      "oncology_treatment": "Tratamiento oncológico si aplica",
-      "oncology_status": "Estado/etapa oncológica si aplica",
-      "unit_classification": "UTI" | "UTIM" | "Piso"
+      "surgery_findings": "Hallazgos quirúrgicos importantes",
+      "medical_history": "Antecedentes personales patológicos relevantes",
+      "allergies": "Alergias específicas o 'Ninguna referida'",
+      "important_medications": "Medicamentos crónicos importantes",
+      "oncology_treatment": "Tratamiento oncológico actual si aplica",
+      "oncology_status": "Estado / estadio oncológico si aplica",
+      "unit_classification": "UTI" | "UTIM" | "Piso",
+      "is_surgical": true | false,
+      "is_pending_discharge": true | false,
+      "labs": "Todos los laboratorios recientes del paciente en el censo (Hb, leucocitos, plaquetas, Cr, electrolitos, PCR, etc.)",
+      "studies": "Estudios de imagen y procedimientos recientes (USG, TAC, endoscopias, RMN, etc.)",
+      "events": "Hallazgos importantes / eventos relevantes / cambios clínicos del día mencionados en el censo"
     }}
   ]
 }}
 
-Reglas estrictas:
-1. Extrae UN objeto por cada paciente identificado en el censo.
-2. Si un campo NO está en el texto, ponlo como null. NO inventes.
+Reglas ESTRICTAS:
+1. Extrae UN objeto por cada paciente EN EL MISMO ORDEN que aparecen en el censo. Preserva la secuencia exacta.
+2. Si un campo NO está en el texto → null. NO inventes datos.
 3. Fechas SIEMPRE en formato ISO YYYY-MM-DD. Si solo hay día/mes, usa el año actual ({now_utc().year}).
-4. name es OBLIGATORIO. Sin nombre, omite ese paciente.
-5. DEIH = días de estancia, DPQX = días postquirúrgicos. NO los pongas en el JSON (se calculan de las fechas).
-6. unit_classification: si dice piso general → "Piso"; UTI o Terapia Intensiva → "UTI"; UTIM o Terapia Intermedia → "UTIM".
-7. Devuelve SOLO el JSON, sin ```json``` ni explicaciones."""
+4. name es OBLIGATORIO. Sin nombre válido, omite ese paciente.
+5. `attending_physician`: SOLO el médico TRATANTE / adscrito responsable del paciente (buscar palabras clave: "Tratante", "Adscrito", "Dr.", "Dra." junto al paciente). NUNCA incluir aquí interconsultantes.
+6. NO extraigas interconsultantes. NO devuelvas el campo "consultants". El usuario los capturará manualmente.
+7. `is_surgical`: true si el paciente tiene procedimiento quirúrgico realizado o programado; false si es paciente no quirúrgico (manejo médico, en observación por otro servicio, sin cirugía en el episodio actual).
+8. `is_pending_discharge`: true si el censo menciona "alta pendiente", "en espera de alta", "alta hoy", "candidato a egreso"; false en cualquier otro caso.
+9. `unit_classification`: "UTI" si Terapia Intensiva; "UTIM" si Terapia Intermedia; "Piso" en cualquier otro caso.
+10. `labs`, `studies`, `events`: extrae TODO el contenido clínico de la columna correspondiente del censo (quinta columna o similar). Esta información se usará para el pase del día. NO omitas ninguna información clínica útil aunque parezca larga.
+11. Devuelve SOLO el JSON, sin ```json``` ni explicaciones."""
 
     text = await llm_generate(system, prompt)
     # Strip potential markdown fences
     text = text.strip()
     if text.startswith("```"):
-        text = text.split("```", 2)
-        text = text[1] if len(text) > 1 else ""
+        parts = text.split("```", 2)
+        text = parts[1] if len(parts) > 1 else ""
         if text.startswith("json"):
             text = text[4:]
         text = text.strip("`").strip()
@@ -711,7 +744,6 @@ Reglas estrictas:
     try:
         data = _json.loads(text)
     except Exception as e:
-        # Try to extract JSON block
         import re
         m = re.search(r"\{.*\}", text, re.S)
         if not m:
@@ -736,8 +768,12 @@ IMPORT_JOBS: dict[str, dict] = {}
 
 
 @api.post("/patients/import-censo")
-async def import_censo(file: UploadFile = File(...), user: dict = Depends(get_user)):
-    """Kick off async census import job. Returns job_id immediately to avoid gateway timeout."""
+async def import_censo(
+    file: UploadFile = File(...),
+    confirm: bool = False,
+    user: dict = Depends(get_user),
+):
+    """Kick off async census import job. If confirm=false → preview mode (no changes applied)."""
     filename = (file.filename or "").lower()
     if not filename.endswith(".docx"):
         raise HTTPException(status_code=400, detail="El archivo debe ser un .docx")
@@ -756,12 +792,12 @@ async def import_censo(file: UploadFile = File(...), user: dict = Depends(get_us
         "status": "running",
         "user_id": user["id"],
         "started_at": now_utc().isoformat(),
+        "confirm": confirm,
         "result": None,
         "error": None,
     }
-    # Fire-and-forget background task
-    asyncio.create_task(_run_import_job(job_id, raw_text, user["id"]))
-    return {"job_id": job_id, "status": "running"}
+    asyncio.create_task(_run_import_job(job_id, raw_text, user["id"], confirm))
+    return {"job_id": job_id, "status": "running", "confirm": confirm}
 
 
 @api.get("/patients/import-censo/status/{job_id}")
@@ -775,12 +811,13 @@ async def import_censo_status(job_id: str, user: dict = Depends(get_user)):
         "status": job["status"],
         "result": job.get("result"),
         "error": job.get("error"),
+        "confirm": job.get("confirm"),
         "started_at": job.get("started_at"),
     }
 
 
-async def _run_import_job(job_id: str, raw_text: str, user_id: str):
-    """Background task that parses the census with GPT and upserts patients."""
+async def _run_import_job(job_id: str, raw_text: str, user_id: str, confirm: bool):
+    """Background task that parses the census with GPT and (optionally) upserts patients."""
     try:
         errors: list[str] = []
         try:
@@ -800,8 +837,9 @@ async def _run_import_job(job_id: str, raw_text: str, user_id: str):
 
         new_ones: list[dict] = []
         updated_ones: list[dict] = []
+        today = today_iso()
 
-        for entry in parsed:
+        for order_idx, entry in enumerate(parsed):
             try:
                 if not isinstance(entry, dict):
                     errors.append(f"Registro inválido (no es objeto): {str(entry)[:80]}")
@@ -818,26 +856,36 @@ async def _run_import_job(job_id: str, raw_text: str, user_id: str):
                         payload["age"] = int(payload["age"])
                     except Exception:
                         payload.pop("age", None)
+                # Always update the censo_order for each imported patient
+                payload["censo_order"] = order_idx
 
                 prev = name_to_patient.get(key)
                 if prev:
                     update = {k: v for k, v in payload.items() if v not in (None, "")}
                     if update:
                         update["updated_at"] = now_utc().isoformat()
-                        await db.patients.update_one(
-                            {"id": prev["id"], "user_id": user_id}, {"$set": update}
-                        )
+                        if confirm:
+                            await db.patients.update_one(
+                                {"id": prev["id"], "user_id": user_id}, {"$set": update}
+                            )
                         merged = {**prev, **update}
                         updated_ones.append({"id": prev["id"], "name": merged["name"]})
+                    # Store labs/studies/events of the day (5th column) if present
+                    if confirm:
+                        await _upsert_daily_from_censo(prev["id"], user_id, today, entry)
                 else:
-                    new_patient = Patient(
-                        user_id=user_id,
-                        name=name,
-                        is_new_admission=True,
-                        **{k: v for k, v in payload.items() if k != "name"},
-                    )
-                    await db.patients.insert_one(new_patient.model_dump())
-                    new_ones.append({"id": new_patient.id, "name": new_patient.name})
+                    if confirm:
+                        new_patient = Patient(
+                            user_id=user_id,
+                            name=name,
+                            is_new_admission=True,
+                            **{k: v for k, v in payload.items() if k != "name"},
+                        )
+                        await db.patients.insert_one(new_patient.model_dump())
+                        await _upsert_daily_from_censo(new_patient.id, user_id, today, entry)
+                        new_ones.append({"id": new_patient.id, "name": new_patient.name})
+                    else:
+                        new_ones.append({"id": None, "name": name})
             except Exception as e:
                 logger.exception("Failed processing entry %s", entry)
                 errors.append(f"Error procesando '{entry.get('name', '?')}': {str(e)[:120]}")
@@ -846,10 +894,11 @@ async def _run_import_job(job_id: str, raw_text: str, user_id: str):
         for key, p in name_to_patient.items():
             if key not in seen_names:
                 try:
-                    await db.patients.update_one(
-                        {"id": p["id"], "user_id": user_id},
-                        {"$set": {"active": False, "discharged_at": today_iso(), "updated_at": now_utc().isoformat()}},
-                    )
+                    if confirm:
+                        await db.patients.update_one(
+                            {"id": p["id"], "user_id": user_id},
+                            {"$set": {"active": False, "discharged_at": today_iso(), "updated_at": now_utc().isoformat()}},
+                        )
                     discharged_ones.append({"id": p["id"], "name": p["name"]})
                 except Exception as e:
                     errors.append(f"Error al mover a egresados '{p.get('name')}': {str(e)[:120]}")
@@ -863,6 +912,7 @@ async def _run_import_job(job_id: str, raw_text: str, user_id: str):
                 "discharged": discharged_ones,
                 "errors": errors,
                 "parsed_count": len(parsed),
+                "confirm": confirm,
             },
         }
     except Exception as e:
@@ -872,6 +922,40 @@ async def _run_import_job(job_id: str, raw_text: str, user_id: str):
             "status": "failed",
             "error": f"Error inesperado: {str(e)[:300]}",
         }
+
+
+async def _upsert_daily_from_censo(patient_id: str, user_id: str, target_date: str, entry: dict):
+    """Merge labs/studies/events from a census row into the day's daily_entry (append, don't overwrite)."""
+    labs = entry.get("labs")
+    studies = entry.get("studies")
+    events = entry.get("events")
+    if not any([labs, studies, events]):
+        return
+    existing = await db.daily_entries.find_one(
+        {"patient_id": patient_id, "user_id": user_id, "date": target_date}
+    )
+    now_iso = now_utc().isoformat()
+    if not existing:
+        de = DailyEntry(
+            patient_id=patient_id, user_id=user_id, date=target_date,
+            labs=labs or "", studies=studies or "", events=events or "",
+        )
+        await db.daily_entries.insert_one(de.model_dump())
+        return
+    update = {"updated_at": now_iso}
+    for field, val in (("labs", labs), ("studies", studies), ("events", events)):
+        if not val:
+            continue
+        existing_val = (existing.get(field) or "").strip()
+        if existing_val and val.strip() not in existing_val:
+            update[field] = existing_val + "\n" + val.strip()
+        elif not existing_val:
+            update[field] = val.strip()
+    if len(update) > 1:
+        await db.daily_entries.update_one(
+            {"patient_id": patient_id, "user_id": user_id, "date": target_date},
+            {"$set": update},
+        )
 
 
 # ---------------- Paciente sin cambios ----------------
@@ -1147,6 +1231,209 @@ Reglas estrictas:
     system = "Eres experto en redacción de notas de ingreso hospitalario de cirugía general para MedSys. No inventas datos clínicos. Español médico profesional."
     note = await llm_generate(system, prompt)
     return {"note": note}
+
+
+# ---------------- NOTA DE INGRESO (pegada desde MedSys) ----------------
+class AdmissionNotePaste(BaseModel):
+    text: str
+
+
+@api.post("/patients/{patient_id}/admission-note")
+async def paste_admission_note(
+    patient_id: str, body: AdmissionNotePaste, user: dict = Depends(get_user)
+):
+    """Guarda la nota de ingreso pegada desde MedSys y usa GPT para extraer campos fijos
+    (merge no-destructivo — nunca borra información previa)."""
+    patient = await db.patients.find_one({"id": patient_id, "user_id": user["id"]}, {"_id": 0})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Paciente no encontrado")
+    text = (body.text or "").strip()
+    if not text or len(text) < 20:
+        raise HTTPException(status_code=400, detail="El texto de la nota está vacío o es demasiado corto")
+
+    # Always save the raw text first (permanent)
+    await db.patients.update_one(
+        {"id": patient_id, "user_id": user["id"]},
+        {"$set": {"admission_note_text": text, "updated_at": now_utc().isoformat()}},
+    )
+
+    # Extract structured fields with GPT
+    system = (
+        "Eres un asistente que EXTRAE información clínica de una nota de ingreso hospitalario pegada literalmente. "
+        "Devuelves EXCLUSIVAMENTE JSON válido. Nunca inventas datos. Si un campo no está, usas null."
+    )
+    prompt = f"""Extrae de esta NOTA DE INGRESO los siguientes campos.
+
+NOTA DE INGRESO (texto tal como fue pegado):
+{text}
+
+Devuelve JSON con esta forma exacta:
+{{
+  "admission_reason": "Motivo de ingreso (una línea si está presente)",
+  "current_illness": "Padecimiento actual completo tal como está escrito",
+  "admission_diagnosis": "Diagnóstico(s) de ingreso principal(es)",
+  "medical_history": "Antecedentes personales patológicos importantes (crónicos, degenerativos, etc.)",
+  "previous_surgeries": "Cirugías previas si están mencionadas",
+  "allergies": "Alergias específicas (medicamentos o sustancias)",
+  "important_medications": "Medicamentos habituales / crónicos",
+  "surgery_procedure": "Procedimiento quirúrgico realizado / planeado si está en la nota",
+  "surgery_findings": "Hallazgos quirúrgicos si están mencionados",
+  "oncology_status": "Estado oncológico si aplica (estadio, tipo, actividad de la enfermedad)"
+}}
+
+Reglas ESTRICTAS:
+1. NO inventes nada. Si un campo NO está en la nota → null.
+2. Copia el texto literal cuando corresponda; no reformules ni resumas en exceso.
+3. NO extraigas ni menciones interconsultantes (esos los captura el usuario manualmente).
+4. Devuelve SOLO el JSON, sin ```json``` ni explicaciones."""
+
+    try:
+        raw = await llm_generate(system, prompt)
+    except Exception as e:
+        return {
+            "ok": True,
+            "extracted": {},
+            "merged_fields": [],
+            "warning": f"Nota guardada, pero la extracción con IA falló: {str(e)[:200]}",
+        }
+
+    raw = raw.strip()
+    if raw.startswith("```"):
+        parts = raw.split("```", 2)
+        raw = parts[1] if len(parts) > 1 else ""
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip("`").strip()
+
+    import json as _json
+    try:
+        data = _json.loads(raw)
+    except Exception:
+        import re
+        m = re.search(r"\{.*\}", raw, re.S)
+        data = _json.loads(m.group(0)) if m else {}
+
+    # Non-destructive merge: only fill fields that are currently empty/null
+    FIELD_MAP = {
+        "current_illness": "dx_full",
+        "admission_diagnosis": "dx_short",
+        "medical_history": "medical_history",
+        "allergies": "allergies",
+        "important_medications": "important_medications",
+        "surgery_procedure": "surgery_procedure",
+        "surgery_findings": "surgery_findings",
+        "oncology_status": "oncology_status",
+    }
+    merged_fields: list[str] = []
+    to_update: dict = {}
+    for src, dst in FIELD_MAP.items():
+        val = data.get(src)
+        if not val or not isinstance(val, str) or not val.strip():
+            continue
+        current = (patient.get(dst) or "").strip()
+        if not current:
+            to_update[dst] = val.strip()
+            merged_fields.append(dst)
+        elif val.strip() != current and len(val.strip()) > len(current):
+            # Append if new content adds substantially more info
+            to_update[dst] = current + "\n\n[Nota de ingreso]: " + val.strip()
+            merged_fields.append(dst)
+
+    if to_update:
+        to_update["updated_at"] = now_utc().isoformat()
+        await db.patients.update_one(
+            {"id": patient_id, "user_id": user["id"]}, {"$set": to_update}
+        )
+
+    return {"ok": True, "extracted": data, "merged_fields": merged_fields}
+
+
+# ---------------- NOTAS ADICIONALES (otros servicios) ----------------
+class AdditionalNoteCreate(BaseModel):
+    source: str  # e.g. "Medicina Interna", "UTI", "Oncología"
+    text: str
+
+
+@api.get("/patients/{patient_id}/additional-notes")
+async def list_additional_notes(patient_id: str, user: dict = Depends(get_user)):
+    patient = await db.patients.find_one({"id": patient_id, "user_id": user["id"]}, {"_id": 0})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Paciente no encontrado")
+    cur = db.additional_notes.find(
+        {"patient_id": patient_id, "user_id": user["id"]}, {"_id": 0}
+    )
+    notes = await cur.to_list(500)
+    notes.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return notes
+
+
+@api.post("/patients/{patient_id}/additional-notes")
+async def add_additional_note(
+    patient_id: str, body: AdditionalNoteCreate, user: dict = Depends(get_user)
+):
+    patient = await db.patients.find_one({"id": patient_id, "user_id": user["id"]}, {"_id": 0})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Paciente no encontrado")
+    text = (body.text or "").strip()
+    source = (body.source or "Otro servicio").strip() or "Otro servicio"
+    if not text or len(text) < 20:
+        raise HTTPException(status_code=400, detail="El texto de la nota está vacío o es demasiado corto")
+
+    # AI executive summary — does NOT modify patient's fixed information
+    system = (
+        "Eres un asistente que genera resúmenes ejecutivos de notas médicas de otros servicios. "
+        "Solo resumes lo que aparece en la nota; NO inventas ni modificas información. "
+        "Español médico profesional."
+    )
+    prompt = f"""Genera un RESUMEN EJECUTIVO breve de esta nota clínica proveniente de otro servicio médico ({source}).
+
+NOTA COMPLETA:
+{text}
+
+Formato (texto plano, sin markdown), máximo 12 líneas:
+
+RESUMEN — {source}
+Impresión diagnóstica: (1-2 líneas)
+Cambios importantes: (bullets con lo relevante clínicamente)
+Recomendaciones: (bullets del servicio)
+Pendientes: (bullets)
+
+Reglas:
+1. NO inventes. Solo lo que está en la nota.
+2. Si algo no está, escribe "ND" o omite la línea.
+3. Español médico. Sin comentarios extra."""
+
+    ai_summary = None
+    warning = None
+    try:
+        ai_summary = await llm_generate(system, prompt)
+    except Exception as e:
+        warning = f"Nota guardada, pero el resumen con IA falló: {str(e)[:200]}"
+
+    note = {
+        "id": str(uuid.uuid4()),
+        "patient_id": patient_id,
+        "user_id": user["id"],
+        "source": source,
+        "text": text,
+        "ai_summary": ai_summary,
+        "created_at": now_utc().isoformat(),
+    }
+    await db.additional_notes.insert_one(note)
+    note.pop("_id", None)
+    return {"note": note, "warning": warning}
+
+
+@api.delete("/patients/{patient_id}/additional-notes/{note_id}")
+async def delete_additional_note(
+    patient_id: str, note_id: str, user: dict = Depends(get_user)
+):
+    result = await db.additional_notes.delete_one(
+        {"id": note_id, "patient_id": patient_id, "user_id": user["id"]}
+    )
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Nota no encontrada")
+    return {"ok": True}
 
 
 _stt_client: Optional[OpenAISpeechToText] = None

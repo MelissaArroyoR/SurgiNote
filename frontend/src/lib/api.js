@@ -36,15 +36,20 @@ export const api = {
   updatePatient: (id, body) => client.patch(`/patients/${id}`, body).then((r) => r.data),
   dischargePatient: (id) => client.delete(`/patients/${id}`).then((r) => r.data),
 
-  importCenso: (file) => {
+  importCenso: (file, confirm) => {
     const form = new FormData();
     form.append("file", file, file.name);
-    return client.post("/patients/import-censo", form, {
+    return client.post(`/patients/import-censo?confirm=${confirm ? "true" : "false"}`, form, {
       headers: { "Content-Type": "multipart/form-data" },
       timeout: 60000,
     }).then((r) => r.data);
   },
   importCensoStatus: (jobId) => client.get(`/patients/import-censo/status/${jobId}`).then((r) => r.data),
+
+  pasteAdmissionNote: (id, text) => client.post(`/patients/${id}/admission-note`, { text }).then((r) => r.data),
+  listAdditionalNotes: (id) => client.get(`/patients/${id}/additional-notes`).then((r) => r.data),
+  addAdditionalNote: (id, source, text) => client.post(`/patients/${id}/additional-notes`, { source, text }).then((r) => r.data),
+  deleteAdditionalNote: (id, noteId) => client.delete(`/patients/${id}/additional-notes/${noteId}`).then((r) => r.data),
 
   listEntries: (id) => client.get(`/patients/${id}/entries`).then((r) => r.data),
   getTodayEntry: (id) => client.get(`/patients/${id}/entries/today`).then((r) => r.data),

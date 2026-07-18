@@ -5,7 +5,7 @@
 
 html, body, #root {
   height: 100%;
-  background-color: #020617;
+  background-color: #F8FAFC;
 }
 
 body {
@@ -13,37 +13,39 @@ body {
   font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  color: #F8FAFC;
-  background-color: #020617;
+  color: #0F172A;
+  background-color: #F8FAFC;
   overscroll-behavior-y: contain;
 }
 
 h1, h2, h3, h4, h5, h6, .font-heading {
   font-family: 'Manrope', ui-sans-serif, system-ui;
   letter-spacing: -0.01em;
+  color: #0F172A;
 }
 
 @layer base {
   :root {
-    --background: 222 47% 5%;
-    --foreground: 210 40% 98%;
-    --card: 217 33% 17%;
-    --card-foreground: 210 40% 98%;
-    --popover: 217 33% 17%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 38 92% 50%;
-    --primary-foreground: 222 47% 5%;
-    --secondary: 215 25% 27%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
-    --accent: 215 25% 27%;
-    --accent-foreground: 210 40% 98%;
+    /* Light theme — clinical file look */
+    --background: 210 40% 98%;         /* #F8FAFC */
+    --foreground: 222 47% 11%;         /* #0F172A */
+    --card: 0 0% 100%;                 /* #FFFFFF */
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    --primary: 217 91% 45%;            /* #1D4ED8 clinical blue */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;   /* #64748B */
+    --accent: 210 40% 96%;
+    --accent-foreground: 222 47% 11%;
     --destructive: 0 84% 60%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 215 25% 27%;
-    --input: 215 25% 27%;
-    --ring: 38 92% 50%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 32% 91%;             /* #E2E8F0 */
+    --input: 214 32% 91%;
+    --ring: 217 91% 60%;
     --radius: 0.5rem;
   }
 }
@@ -58,9 +60,9 @@ h1, h2, h3, h4, h5, h6, .font-heading {
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
 
-::selection { background: #F59E0B; color: #020617; }
+::selection { background: #DBEAFE; color: #0F172A; }
 
 button, a { -webkit-tap-highlight-color: transparent; }
 
