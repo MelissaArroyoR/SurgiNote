@@ -1,0 +1,127 @@
+{
+  "project_name": "SurgiNote (Resident App)",
+  "theme_strategy": "dark-only",
+  "typography": {
+    "fonts": {
+      "headings": "Manrope",
+      "body": "IBM Plex Sans"
+    },
+    "hierarchy": {
+      "H1": "text-3xl sm:text-4xl tracking-tight font-bold",
+      "H2": "text-2xl sm:text-3xl tracking-tight font-semibold",
+      "H3": "text-xl sm:text-2xl tracking-tight font-medium",
+      "Body": "text-base leading-relaxed text-slate-300",
+      "Small": "text-sm text-slate-400 tracking-wide",
+      "Overline": "text-xs font-bold uppercase tracking-[0.2em] text-amber-500"
+    },
+    "rules": [
+      "NO INTER or SPACE GROTESK fonts.",
+      "Headings must use Manrope with tight tracking.",
+      "Body must use IBM Plex Sans for maximum clinical data legibility.",
+      "Use explicit left-alignment for all patient data and clinical text."
+    ]
+  },
+  "colors": {
+    "palette": {
+      "background": "#020617",
+      "surface": "#0F172A",
+      "card": "#1E293B",
+      "border": "#334155",
+      "primary": "#F59E0B",
+      "primary_hover": "#D97706",
+      "text_main": "#F8FAFC",
+      "text_muted": "#94A3B8",
+      "success": "#10B981",
+      "danger": "#EF4444"
+    },
+    "rules": [
+      "Dark theme default. Avoid generic hospital blues. Use Amber as the primary action color for a premium, high-visibility contrast in low-light environments.",
+      "Background must be deep slate (#020617).",
+      "No full-screen gradients. Keep backgrounds solid to prevent data refraction.",
+      "No transparent surfaces over content."
+    ]
+  },
+  "visual_enhancers": {
+    "surfaces": "Flat Solid Surfaces with 1px borders (border-slate-700). NO glassmorphism in this app to ensure clinical data clarity.",
+    "borders": "Max 8px border-radius (rounded-lg) for cards, rounded-2xl or full for major buttons.",
+    "shadows": "Minimal. Rely on 1px borders to separate overlapping elements. Use subtle shadow-lg for floating elements like the Voice Dictation button."
+  },
+  "layouts": {
+    "general": "Mobile-first, optimized for iPhone/iPad. Max width for desktop is 800px to maintain mobile-app feel.",
+    "spacing": "Generous vertical spacing (p-6, p-8) between sections. Dense padding within patient cards (p-4) to fit data.",
+    "navigation": "Fixed bottom tab bar (h-20) with 4 tabs: PACIENTES, PASE, NOTAS, INGRESOS. Add safe-area padding at the bottom.",
+    "views": {
+      "patient_list": "Vertical list of cards. No multi-column grids on mobile. iPad can use 2 columns (md:grid-cols-2).",
+      "patient_detail": "Sticky header with patient core info (Name, bed, age). Scrollable body for daily entries. Large floating action button for Voice Dictation."
+    }
+  },
+  "components": {
+    "buttons": {
+      "style": "Large tap targets (min-h-[60px]). Pill-shaped (rounded-full) or large rounded-xl for main CTAs.",
+      "voice_dictation": "Prominent, floating (or fixed at bottom above tab bar), circular, bg-amber-500 text-slate-950, very large microphone icon.",
+      "guardar": "Full width button, bg-amber-500 text-slate-950, font-bold."
+    },
+    "cards": {
+      "style": "bg-slate-800 border border-slate-700 rounded-lg p-4. No shadows. High contrast text.",
+      "content": "Use flex-row for quick stats (Bed, Floor, Days), flex-col for diagnoses."
+    },
+    "inputs": {
+      "style": "Large text areas for notes. bg-slate-900 border border-slate-700 rounded-lg p-4 text-slate-50 focus:border-amber-500 focus:ring-1 focus:ring-amber-500. min-h-[60px] for inputs.",
+      "voice_support": "Include visual indicators when voice dictation is active (e.g., pulsing animation)."
+    },
+    "tabs": {
+      "style": "Bottom navigation bar. bg-slate-900 border-t border-slate-800 fixed bottom-0 w-full flex justify-around items-center pb-safe pt-2 h-20 z-50."
+    }
+  },
+  "motion": {
+    "rules": [
+      "Snappy and responsive. No long fade-ins.",
+      "Micro-interactions: Buttons slightly scale down on active (scale-95).",
+      "Pulsing animation for active Voice Dictation to indicate recording state.",
+      "Slide-up transition for the patient detail view."
+    ]
+  },
+  "accessibility": {
+    "rules": [
+      "Minimum touch target size is 60x60px for critical actions (while walking).",
+      "WCAG AAA contrast for clinical text.",
+      "Include data-testid attributes on ALL interactive elements (e.g., data-testid='tab-pacientes', data-testid='btn-voice-dictation', data-testid='input-daily-note').",
+      "Non-color encoding: Always pair status colors with icons."
+    ]
+  },
+  "icons": {
+    "library": "@phosphor-icons/react",
+    "instructions": "Install using 'yarn add @phosphor-icons/react'. Use weight='duotone' for active tabs, weight='regular' for inactive, and weight='fill' for the voice dictation mic."
+  },
+  "views_structure": {
+    "PACIENTES": "Main censo list. Cards with: Nombre, Cama, Piso, Días estancia, Días postquirúrgicos, Dx resumido. Tap opens Patient Detail.",
+    "Patient Detail": "Persistent Header: Nombre, Edad, Sexo, Cama, Piso, Dx resumido/completo, Procedimiento quirúrgico/fecha, Hallazgos, Antecedentes, Interconsultantes, Tratamiento. Daily Entry Zone: Voice dictation button, text area, 'Guardar al Pase' button. Timeline of events below.",
+    "PASE": "Aggregated document view. Summarizes all patients' daily entries. Includes lab comparison section. Optimized for reading aloud during rounds.",
+    "NOTAS": "Generates structured evolution note and WhatsApp message per patient. Includes large 'Copiar' buttons.",
+    "INGRESOS": "Placeholder tab with 'Próximamente' message and a sleek locked graphic."
+  },
+  "instructions_to_main_agent": [
+    "You are building a premium medical web app for iOS (iPhone/iPad). Focus on mobile layouts.",
+    "Initialize Tailwind config with the specified slate and amber palette. Add Manrope and IBM Plex Sans to fonts.",
+    "Do NOT add 'text-align: center' to App.css.",
+    "Ensure the bottom navigation bar is fixed and handles iOS safe areas (pb-safe or pb-6).",
+    "Build the UI entirely in Spanish.",
+    "Include a small disclaimer on the Login screen: 'Esta herramienta no es un expediente clínico oficial ni sustituye el juicio médico.'",
+    "Implement Shadcn UI for basic components (Dialog, Tabs) but customize heavily to match the flat solid, 1px border aesthetic.",
+    "The Voice Dictation button must be the most visually prominent element on the patient daily entry screen. Provide a mock pulsing interaction for it.",
+    "Use Phosphor icons. Install the package: yarn add @phosphor-icons/react",
+    "For the 'Patient Detail' view, make the patient demographics sticky at the top while scrolling the daily notes.",
+    "Add data-testid to every button, tab, card, and input."
+  ],
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
+    "Do not converge toward generic AI slop. Use high contrast, solid dark backgrounds, and crisp 1px borders.",
+    "Never use dark colors as gradients. Use solid colors.",
+    "Create depth through z-index and 1px borders, NOT heavy box shadows.",
+    "Do not apply 'transition: all' globally.",
+    "Use pill-shaped or large rectangular buttons with specific hover/active states.",
+    "Never use AI assistant Emoji characters for icons.",
+    "Use 2x more padding than standard for touch targets. Everything must be easily tappable while walking (60px min height).",
+    "Prioritize using pre-existing components from src/components/ui.",
+    "Use 'sonner' for toast notifications (e.g., 'Nota copiada', 'Guardado al Pase')."
+  ]
+}
