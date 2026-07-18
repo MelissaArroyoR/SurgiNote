@@ -29,10 +29,21 @@ export const api = {
   me: () => client.get("/auth/me").then((r) => r.data),
 
   listPatients: () => client.get("/patients").then((r) => r.data),
+  listDischarged: () => client.get("/patients/discharged").then((r) => r.data),
+  readmitPatient: (id) => client.post(`/patients/${id}/readmit`).then((r) => r.data),
   createPatient: (body) => client.post("/patients", body).then((r) => r.data),
   getPatient: (id) => client.get(`/patients/${id}`).then((r) => r.data),
   updatePatient: (id, body) => client.patch(`/patients/${id}`, body).then((r) => r.data),
   dischargePatient: (id) => client.delete(`/patients/${id}`).then((r) => r.data),
+
+  importCenso: (file) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return client.post("/patients/import-censo", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 180000,
+    }).then((r) => r.data);
+  },
 
   listEntries: (id) => client.get(`/patients/${id}/entries`).then((r) => r.data),
   getTodayEntry: (id) => client.get(`/patients/${id}/entries/today`).then((r) => r.data),
@@ -40,6 +51,8 @@ export const api = {
 
   generatePase: (id, date) => client.post(`/patients/${id}/generate/pase`, { date }).then((r) => r.data),
   generateNote: (id, date) => client.post(`/patients/${id}/generate/note`, { date }).then((r) => r.data),
+  generateNoChanges: (id, date) => client.post(`/patients/${id}/generate/no-changes`, { date }).then((r) => r.data),
+  generateAdmission: (id, date) => client.post(`/patients/${id}/generate/admission`, { date }).then((r) => r.data),
   fullPase: () => client.post("/pase/today").then((r) => r.data),
 
   transcribe: (blob) => {

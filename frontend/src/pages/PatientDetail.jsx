@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   ArrowLeft, Pencil, BedDouble, Building2, Calendar, Activity,
-  Save, ClipboardCheck, Sparkles, Copy, Trash2, ChevronDown, ChevronUp, Clock
+  Save, ClipboardCheck, Sparkles, Copy, Trash2, ChevronDown, ChevronUp, Clock, Zap
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Textarea } from "@/components/ui/textarea";
@@ -37,6 +37,7 @@ export default function PatientDetail() {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [generatingPase, setGeneratingPase] = useState(false);
+  const [generatingNoChanges, setGeneratingNoChanges] = useState(false);
   const [pase, setPase] = useState("");
   const debounceRef = useRef(null);
 
@@ -88,6 +89,29 @@ export default function PatientDetail() {
       toast.error(e?.response?.data?.detail || "Error al generar resumen");
     } finally {
       setGeneratingPase(false);
+    }
+  };
+
+  const doGenerateNoChanges = async () => {
+    if (!window.confirm("¿Confirmar que el paciente NO tuvo eventualidades en las últimas 24 horas? Se generarán automáticamente pase, nota y mensaje de WhatsApp.")) return;
+    setGeneratingNoChanges(true);
+    setPase("");
+    try {
+      // Ensure latest labs are saved before generating
+      await api.updateTodayEntry(id, {
+        dictation: entry.dictation || "",
+        labs: entry.labs || "",
+        studies: entry.studies || "",
+        events: entry.events || "",
+      });
+      const { summary } = await api.generateNoChanges(id);
+      setPase(summary);
+      setEntry((e) => ({ ...e, ai_pase_summary: summary, saved_to_pase: true }));
+      toast.success("Paciente sin cambios: pase, nota y WhatsApp generados");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Error al generar");
+    } finally {
+      setGeneratingNoChanges(false);
     }
   };
 
@@ -148,8 +172,8 @@ export default function PatientDetail() {
         <div className="grid grid-cols-2 gap-y-3 gap-x-4 text-sm">
           <div className="flex items-center gap-2 text-slate-300"><BedDouble className="w-4 h-4 text-amber-500" />Cama {patient.bed || "ND"}</div>
           <div className="flex items-center gap-2 text-slate-300"><Building2 className="w-4 h-4 text-amber-500" />Piso {patient.floor || "ND"}</div>
-          <div className="flex items-center gap-2 text-slate-300"><Calendar className="w-4 h-4 text-amber-500" />DEA {patient.days_admission ?? "ND"}</div>
-          <div className="flex items-center gap-2 text-slate-300"><Activity className="w-4 h-4 text-amber-500" />DPQ {patient.days_postop ?? "ND"}</div>
+          <div className="flex items-center gap-2 text-slate-300"><Calendar className="w-4 h-4 text-amber-500" />DEIH {patient.days_admission ?? "ND"}</div>
+          <div className="flex items-center gap-2 text-slate-300"><Activity className="w-4 h-4 text-amber-500" />DPQX {patient.days_postop ?? "ND"}</div>
         </div>
 
         <button
@@ -162,12 +186,17 @@ export default function PatientDetail() {
 
         {expandedInfo && (
           <div className="mt-4 pt-4 border-t border-slate-700 space-y-1" data-testid="patient-fixed-info">
+            <Field label="Servicio" value={patient.service} />
+            <Field label="Unidad" value={patient.unit_classification} />
             <Field label="Diagnóstico resumido" value={patient.dx_short} />
             <Field label="Diagnóstico completo" value={patient.dx_full} />
             <Field label="Cirugía" value={patient.surgery_date ? `${patient.surgery_date} — ${patient.surgery_procedure || ""}` : patient.surgery_procedure} />
             <Field label="Hallazgos quirúrgicos" value={patient.surgery_findings} />
             <Field label="Antecedentes personales" value={patient.medical_history} />
+            <Field label="Alergias" value={patient.allergies} />
+            <Field label="Medicamentos importantes" value={patient.important_medications} />
             <Field label="Interconsultantes" value={patient.consultants} />
+            <Field label="Estado oncológico" value={patient.oncology_status} />
             <Field label="Tratamiento oncológico" value={patient.oncology_treatment} />
           </div>
         )}

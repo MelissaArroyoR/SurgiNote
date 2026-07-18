@@ -8,10 +8,11 @@ import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 
 const EMPTY = {
-  name: "", age: "", sex: "", bed: "", floor: "",
+  name: "", age: "", sex: "", bed: "", floor: "", service: "",
   dx_short: "", dx_full: "",
   admission_date: "", surgery_date: "", surgery_procedure: "", surgery_findings: "",
-  medical_history: "", consultants: "", oncology_treatment: "",
+  medical_history: "", allergies: "", important_medications: "",
+  consultants: "", oncology_treatment: "", oncology_status: "", unit_classification: "",
 };
 
 export default function PatientFormDialog({ open, onOpenChange, patient, onSaved }) {
@@ -27,6 +28,7 @@ export default function PatientFormDialog({ open, onOpenChange, patient, onSaved
         sex: patient.sex || "",
         bed: patient.bed || "",
         floor: patient.floor || "",
+        service: patient.service || "",
         dx_short: patient.dx_short || "",
         dx_full: patient.dx_full || "",
         admission_date: patient.admission_date || "",
@@ -34,8 +36,12 @@ export default function PatientFormDialog({ open, onOpenChange, patient, onSaved
         surgery_procedure: patient.surgery_procedure || "",
         surgery_findings: patient.surgery_findings || "",
         medical_history: patient.medical_history || "",
+        allergies: patient.allergies || "",
+        important_medications: patient.important_medications || "",
         consultants: patient.consultants || "",
         oncology_treatment: patient.oncology_treatment || "",
+        oncology_status: patient.oncology_status || "",
+        unit_classification: patient.unit_classification || "",
       });
     } else {
       setForm(EMPTY);
@@ -98,6 +104,16 @@ export default function PatientFormDialog({ open, onOpenChange, patient, onSaved
             <Label className="text-slate-300 text-sm">Piso / Servicio</Label>
             <Input data-testid="input-patient-floor" value={form.floor} onChange={upd("floor")} className={fieldCls} />
           </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label className="text-slate-300 text-sm">Servicio</Label>
+              <Input placeholder="Cirugía General" data-testid="input-patient-service" value={form.service} onChange={upd("service")} className={fieldCls} />
+            </div>
+            <div>
+              <Label className="text-slate-300 text-sm">Unidad</Label>
+              <Input placeholder="Piso / UTI / UTIM" data-testid="input-unit" value={form.unit_classification} onChange={upd("unit_classification")} className={fieldCls} />
+            </div>
+          </div>
           <div>
             <Label className="text-slate-300 text-sm">Diagnóstico resumido</Label>
             <Input placeholder="Ej. Apendicitis aguda perforada" data-testid="input-dx-short" value={form.dx_short} onChange={upd("dx_short")} className={fieldCls} />
@@ -129,12 +145,26 @@ export default function PatientFormDialog({ open, onOpenChange, patient, onSaved
             <Textarea data-testid="input-medical-history" value={form.medical_history} onChange={upd("medical_history")} rows={2} className={fieldCls} />
           </div>
           <div>
+            <Label className="text-slate-300 text-sm">Alergias</Label>
+            <Input placeholder="Ninguna referida" data-testid="input-allergies" value={form.allergies} onChange={upd("allergies")} className={fieldCls} />
+          </div>
+          <div>
+            <Label className="text-slate-300 text-sm">Medicamentos importantes / crónicos</Label>
+            <Textarea data-testid="input-important-meds" value={form.important_medications} onChange={upd("important_medications")} rows={2} className={fieldCls} />
+          </div>
+          <div>
             <Label className="text-slate-300 text-sm">Interconsultantes activos</Label>
             <Textarea placeholder="Ej. Cardiología, Infectología..." data-testid="input-consultants" value={form.consultants} onChange={upd("consultants")} rows={2} className={fieldCls} />
           </div>
-          <div>
-            <Label className="text-slate-300 text-sm">Tratamiento oncológico</Label>
-            <Textarea data-testid="input-oncology" value={form.oncology_treatment} onChange={upd("oncology_treatment")} rows={2} className={fieldCls} />
+          <div className="grid grid-cols-1 gap-3">
+            <div>
+              <Label className="text-slate-300 text-sm">Estado oncológico</Label>
+              <Input placeholder="Ej. Estadio IIIA, en QT adyuvante" data-testid="input-oncology-status" value={form.oncology_status} onChange={upd("oncology_status")} className={fieldCls} />
+            </div>
+            <div>
+              <Label className="text-slate-300 text-sm">Tratamiento oncológico</Label>
+              <Textarea data-testid="input-oncology" value={form.oncology_treatment} onChange={upd("oncology_treatment")} rows={2} className={fieldCls} />
+            </div>
           </div>
 
           <div className="flex gap-3 pt-2 sticky bottom-0 bg-slate-900 pb-1">
