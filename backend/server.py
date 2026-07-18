@@ -731,7 +731,7 @@ _IMAGING_KW = _re.compile(
 )
 _PROC_KW = _re.compile(
     r"(?:^|\W)(COLONOSCOPIA|ENDOSCOPIA|RHP\b|HALLAZGOS\s+QUIR|DRENAJES?|PARACENTESIS|"
-    r"TORACOCENTESIS|BIOPSIAS?|CIRUG(I|Í)A|POST[\s\-]?OPERATORIO|POP\b|"
+    r"TORACOCENTESIS|BIOPSIAS?|CIRUG(I|Í)A|QUIR[UÚ]RGIC|POST[\s\-]?OPERATORIO|POP\b|"
     r"COLECISTECTOM|APENDICECTOM|LAPAROSCOP|LAPE\b|LAPAROTOM)\b",
     _re.IGNORECASE,
 )
@@ -776,133 +776,223 @@ def _classify_col5_text(text: str) -> dict:
 
 
 async def _parse_censo_with_gpt(raw_text: str) -> list[dict]:
-    """Use GPT-5.2 to parse the raw census text into a structured list of patients."""
-    system = (
-        "Eres un asistente experto en extraer información clínica de censos hospitalarios en español. "
-        "Devuelves EXCLUSIVAMENTE JSON válido, sin markdown ni texto adicional. "
-        "Nunca inventas datos: si un campo no está presente, lo omites o lo dejas en null. "
-        "MUY IMPORTANTE: distingues claramente entre el MÉDICO TRATANTE (adscrito responsable del paciente, "
-        "que suele estar destacado como 'Tratante', 'Dr.', 'Adscrito', 'Médico responsable') "
-        "de los INTERCONSULTANTES (que NO debes extraer del censo — quedarán vacíos)."
-    )
-    prompt = f"""Del siguiente TEXTO DE CENSO HOSPITALARIO extrae la lista de TODOS los pacientes en el ORDEN EXACTO en que aparecen (preservando la secuencia del documento).
+    """DEPRECATED: kept for compatibility, no longer called. Census parsing is now 100% deterministic."""
+    raise RuntimeError("_parse_censo_with_gpt is deprecated. Use _parse_censo_docx_deterministic.")
 
-FORMATO DEL TEXTO: el texto viene extraído de un .docx. Cuando ves marcadores como
-  ===== TABLA N =====
-  ----- FILA N -----
-  [COL 1]: ...
-  [COL 2]: ...
-  [COL 5]: ...
-significa que provienen de una TABLA. Cada FILA es UN PACIENTE. Las columnas normalmente son:
-  COL 1: Nombre / cama / datos de identificación
-  COL 2: Diagnóstico / dx
-  COL 3: Cirugía / procedimiento principal / hallazgos
-  COL 4: Antecedentes / medicamentos / alergias / tratante
-  COL 5: BLOQUE CLÍNICO HETEROGÉNEO con laboratorios, estudios, procedimientos y cultivos del paciente (fechas subrayadas + valores).
-Si el número de columnas es distinto, el bloque clínico grande (con LABS/GASA/TAC/etc.) suele ser la ÚLTIMA columna.
 
-Ejemplo REAL de la ÚLTIMA columna típica (así viene el texto crudo):
+# ---------------- 100% deterministic .docx census parser (NO GPT) ----------------
+_NAME_RE = _re.compile(r"[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ'\-]{1,}(?:\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ'\-]{1,}){1,}")
+_AGE_RE = _re.compile(r"(\d{1,3})\s*(?:años?|a\b|A\b|Y|y/o|yo)", _re.IGNORECASE)
+_SEX_RE = _re.compile(r"(?:^|\W)(masculino|femenino|hombre|mujer|\bM\b|\bF\b)", _re.IGNORECASE)
+_BED_RE = _re.compile(r"\b(S\d{2,3}|\d{3})\b")
+_ATTENDING_RE = _re.compile(
+    r"(?:Tratante|Adscrito|M[ée]dico responsable)\s*[:\-]?\s*(Dr(?:a)?\.?\s+[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑñáéíóúü'\-\.\s]{1,60})",
+    _re.IGNORECASE,
+)
+_ATTENDING_LOOSE_RE = _re.compile(r"\b(Dr(?:a)?\.?\s+[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑñáéíóúü'\-\.]{1,40}(?:\s+[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÑñáéíóúü'\-\.]{1,40})?)\b")
+_DATE_RE = _re.compile(r"\b(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})\b")
+_ALLERGY_RE = _re.compile(r"(?:Alergias?|APNP)\s*[:\-]\s*([^\n]{1,120})", _re.IGNORECASE)
+_MEDS_RE = _re.compile(r"(?:Medicamentos?|Meds?)\s*[:\-]\s*([^\n]{1,200})", _re.IGNORECASE)
+_APP_RE = _re.compile(r"(?:APP|Antecedentes(?:\s+personales)?(?:\s+patol[óo]gicos)?)\s*[:\-]\s*([^\n]{1,300})", _re.IGNORECASE)
+_ONCO_RE = _re.compile(r"(?:Oncol[óo]gico|Estadio|Etapa)\s*[:\-]?\s*([^\n]{1,120})", _re.IGNORECASE)
+_UTI_RE = _re.compile(r"\b(UTI|UTIM|Terapia\s+Intensiva|Terapia\s+Intermedia)\b", _re.IGNORECASE)
+_PENDING_DISCHARGE_RE = _re.compile(r"(alta\s+pendiente|alta\s+hoy|candidato\s+a\s+egreso|en\s+espera\s+de\s+alta)", _re.IGNORECASE)
 
-  30/06/2026
-  LABS: BH Hb 10.2 Leu 12.4 Plt 220 · QS Cr 1.1 Urea 42 Glu 130 · ES Na 138 K 3.7
-  GASA: pH 7.36 pCO2 42 HCO3 22
-  EGO: densidad 1.020 leu 8-10 nitritos -
-  01/07/2026
-  TAC abdomen c/c: colección de 6x4 cm en FID adyacente al ciego, sin neumoperitoneo
-  USG hígado: sin lesiones
-  02/07/2026
-  Colonoscopia: pólipo sesil de 8 mm en sigma, resecado. RHP pendiente.
-  03/07/2026
-  Hemocultivo #2: E. coli BLEE (+) sensible a meropenem
-  Gram: bacilos gram (-)
 
-Debes SEPARAR ese bloque en 4 categorías cuando aparezca:
-
-Devuelve un objeto JSON con esta forma exacta:
-{{
-  "patients": [
-    {{
-      "name": "Nombre Apellido Apellido",
-      "age": 45,
-      "sex": "M" | "F",
-      "bed": "305",
-      "floor": "3",
-      "service": "Cirugía General",
-      "attending_physician": "Dr. Apellido / Dra. Apellido (SOLO médico tratante/adscrito responsable — NUNCA interconsultantes)",
-      "admission_date": "YYYY-MM-DD",
-      "surgery_date": "YYYY-MM-DD",
-      "dx_short": "Diagnóstico resumido (una línea) — SOLO nombre de la enfermedad",
-      "dx_full": "Diagnóstico completo con detalles clínicos — SIN reportes de estudios",
-      "surgery_procedure": "Procedimiento quirúrgico realizado",
-      "surgery_findings": "Hallazgos quirúrgicos (del acto quirúrgico previo)",
-      "medical_history": "Antecedentes personales patológicos relevantes",
-      "allergies": "Alergias específicas o 'Ninguna referida'",
-      "important_medications": "Medicamentos crónicos importantes",
-      "oncology_treatment": "Tratamiento oncológico actual si aplica",
-      "oncology_status": "Estado / estadio oncológico si aplica",
-      "unit_classification": "UTI" | "UTIM" | "Piso",
-      "is_surgical": true | false,
-      "is_pending_discharge": true | false,
-      "labs": "TEXTO ÍNTEGRO de los bloques de LABORATORIOS. Toda fecha que introduzca LABS/BH/QS/ES/PFH/GASA/GASV/EGO va aquí, con su fecha. Copia LITERAL. No resumas.",
-      "studies": "TEXTO ÍNTEGRO de ESTUDIOS DE IMAGEN: RXTX, TAC, ANGIOTAC, RM, RMN, USG, PET-CT, ECG, SEGD, MASTOGRAFÍA, TC, tomografía, ecocardiograma. Con fecha si tiene. LITERAL.",
-      "procedures": "TEXTO ÍNTEGRO de PROCEDIMIENTOS: colonoscopia, endoscopia, RHP, hallazgos quirúrgicos del día, drenajes, paracentesis, biopsias, cirugía. LITERAL.",
-      "cultures": "TEXTO ÍNTEGRO de CULTIVOS: hemocultivos, urocultivos, cultivos, Gram, susceptibilidad, desarrollo, BLEE, microorganismo, aislamiento, antibiograma. LITERAL.",
-      "events": "Sólo lo que NO encaje en las 4 categorías anteriores (comentarios libres, cambios clínicos que no son un estudio)."
-    }}
-  ]
-}}
-
-Reglas ESTRICTAS:
-1. Extrae UN objeto por cada FILA de tabla en el MISMO ORDEN. Preserva la secuencia.
-2. Si un campo NO está en el texto → null / "". NO inventes datos.
-3. Fechas SIEMPRE en formato ISO YYYY-MM-DD. Si solo hay día/mes, usa el año actual ({now_utc().year}).
-4. name es OBLIGATORIO. Sin nombre, omite ese paciente.
-5. `attending_physician`: SOLO médico TRATANTE / adscrito responsable. NUNCA interconsultantes.
-6. NO extraigas interconsultantes. NO devuelvas el campo "consultants".
-7. `is_surgical`: true si tiene procedimiento quirúrgico realizado o programado.
-8. `is_pending_discharge`: true si menciona "alta pendiente / hoy / candidato a egreso".
-9. `unit_classification`: "UTI" | "UTIM" | "Piso".
-
-10. RUTEO ESTRICTO DE LA QUINTA (o última) COLUMNA — CRÍTICO:
-   - LABORATORIOS (LABS, BH, QS, ES, PFH, TP, TTP, PCR, procalcitonina, GASA, GASV, EGO, marcadores tumorales, hormonas, Hb, leucocitos, plaquetas, Cr, urea, electrolitos, glucosa, PFH, DHL) → SIEMPRE al campo `labs`.
-   - ESTUDIOS DE IMAGEN (RXTX, RX, TAC, ANGIOTAC, TC, RM, RMN, USG, ultrasonido, PET-CT, PET, ECG, EKG, ecocardiograma, SEGD, mastografía, radiografía, tomografía, resonancia) → SIEMPRE al campo `studies`.
-   - PROCEDIMIENTOS (colonoscopia, endoscopia, RHP, hallazgos quirúrgicos del día, drenajes, paracentesis, toracocentesis, biopsias, cirugías secundarias, POP, laparoscopía, laparotomía) → SIEMPRE al campo `procedures`.
-   - CULTIVOS (hemocultivos, urocultivos, cultivos, Gram, susceptibilidad, desarrollo, BLEE, microorganismo, aislamiento, antibiograma) → SIEMPRE al campo `cultures`.
-   - Copia el bloque completo con su fecha. NO resumas, NO reformatees, NO combines.
-
-11. PROHIBICIONES ABSOLUTAS EN dx_short / dx_full:
-    - Está PROHIBIDO poner: TAC, USG, RX, RM, PET, colonoscopia, endoscopia, RHP, laboratorios, hallazgos quirúrgicos, cultivos.
-    - Ejemplo INCORRECTO — `dx_full`: "TAC: engrosamiento…" ❌ (va a `studies`)
-    - Ejemplo INCORRECTO — `dx_full`: "Colonoscopia: pólipo…" ❌ (va a `procedures`)
-    - Ejemplo CORRECTO — `dx_short`: "Absceso intraabdominal" ✅ + los detalles del TAC en `studies`.
-    - Ejemplo CORRECTO — `dx_short`: "Colitis en estudio" ✅ + resultado del TAC en `studies`.
-
-12. Devuelve SOLO el JSON, sin ```json``` ni explicaciones.
-
-TEXTO DEL CENSO (contenido crudo del .docx):
-{raw_text}"""
-
-    text = await llm_generate(system, prompt)
-    # Strip potential markdown fences
-    text = text.strip()
-    if text.startswith("```"):
-        parts = text.split("```", 2)
-        text = parts[1] if len(parts) > 1 else ""
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip("`").strip()
-    import json as _json
+def _iso_date(s: str) -> Optional[str]:
+    m = _DATE_RE.search(s)
+    if not m:
+        return None
+    d, mo, y = m.group(1), m.group(2), m.group(3)
+    if len(y) == 2:
+        y = "20" + y
     try:
-        data = _json.loads(text)
-    except Exception as e:
-        import re
-        m = re.search(r"\{.*\}", text, re.S)
-        if not m:
-            raise HTTPException(status_code=422, detail=f"No se pudo parsear el censo: {e}")
-        data = _json.loads(m.group(0))
-    patients = data.get("patients", [])
-    if not isinstance(patients, list):
-        raise HTTPException(status_code=422, detail="El censo parseado no contiene lista de pacientes.")
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+    except Exception:
+        return None
+
+
+def _cell_classification_score(text: str) -> int:
+    return (
+        len(_LABS_KW.findall(text)) + len(_IMAGING_KW.findall(text))
+        + len(_PROC_KW.findall(text)) + len(_CULT_KW.findall(text))
+    )
+
+
+def _parse_row_deterministic(cells: list[str]) -> Optional[dict]:
+    """Parse one table row (list of cell texts) into a patient dict using pure regex."""
+    if not any(c.strip() for c in cells):
+        return None
+
+    # Identify the "clinical bulk" cell: highest classification keyword count
+    scores = [(i, _cell_classification_score(c)) for i, c in enumerate(cells)]
+    scores.sort(key=lambda t: -t[1])
+    clinical_idx = scores[0][0] if scores and scores[0][1] > 0 else -1
+    clinical_text = cells[clinical_idx] if clinical_idx >= 0 else ""
+
+    # The rest of the cells contain identity + dx + surgery + antecedents
+    identity_cells = [c for i, c in enumerate(cells) if i != clinical_idx and c.strip()]
+    identity_text = "\n".join(identity_cells)
+
+    # ---- Extract patient fixed fields ----
+    p: dict = {}
+
+    # Name: first sequence of ≥2 uppercase words in the first cell (usually)
+    name = None
+    for c in identity_cells:
+        m = _NAME_RE.search(c)
+        if m:
+            name = m.group(0).strip()
+            break
+    if not name:
+        return None
+    p["name"] = name
+
+    # Age
+    m = _AGE_RE.search(identity_text)
+    if m:
+        try: p["age"] = int(m.group(1))
+        except Exception: pass
+
+    # Sex
+    m = _SEX_RE.search(identity_text)
+    if m:
+        v = m.group(1).lower()
+        p["sex"] = "M" if v.startswith(("m", "h")) else "F"
+
+    # Bed
+    m = _BED_RE.search(identity_text)
+    if m:
+        p["bed"] = m.group(1).upper()
+
+    # Attending physician (explicit "Tratante:" first, then loose "Dr. X")
+    m = _ATTENDING_RE.search(identity_text)
+    if m:
+        p["attending_physician"] = m.group(1).strip()
+    else:
+        m = _ATTENDING_LOOSE_RE.search(identity_text)
+        if m:
+            p["attending_physician"] = m.group(1).strip()
+
+    # Allergies / Meds / APP / Oncologic
+    m = _ALLERGY_RE.search(identity_text)
+    if m: p["allergies"] = m.group(1).strip()
+    m = _MEDS_RE.search(identity_text)
+    if m: p["important_medications"] = m.group(1).strip()
+    m = _APP_RE.search(identity_text)
+    if m: p["medical_history"] = m.group(1).strip()
+    m = _ONCO_RE.search(identity_text)
+    if m: p["oncology_status"] = m.group(1).strip()
+
+    # Unit classification
+    m = _UTI_RE.search(identity_text)
+    p["unit_classification"] = m.group(1).upper() if m else "Piso"
+
+    # is_pending_discharge / is_surgical
+    p["is_pending_discharge"] = bool(_PENDING_DISCHARGE_RE.search(identity_text))
+    # Surgical: any procedure keyword indicating surgery in identity/clinical text
+    surg_hint = _re.search(r"\b(cirug[íi]a|POP|postquir|apendicectom|colecistectom|laparoscop|laparotom)", identity_text, _re.IGNORECASE)
+    p["is_surgical"] = bool(surg_hint) or any(
+        _re.search(r"\b(cirug[íi]a|POP|postquir)", c, _re.IGNORECASE) for c in identity_cells
+    )
+
+    # Dates
+    dates_found = [_iso_date(c) for c in identity_cells]
+    dates_found = [d for d in dates_found if d]
+    if dates_found:
+        dates_found.sort()
+        p["admission_date"] = dates_found[0]
+        if len(dates_found) > 1:
+            p["surgery_date"] = dates_found[-1]
+
+    # dx_short / dx_full: identity cells that are NOT the name cell and NOT clinical bulk.
+    # dx_short = first short line that isn't the name
+    dx_lines: list[str] = []
+    for c in identity_cells:
+        # Skip the cell that contains the name (usually the first identity cell)
+        if name in c:
+            # Remove name from that cell and use the rest
+            rest = c.replace(name, "").strip()
+            if rest:
+                dx_lines.append(rest)
+        else:
+            dx_lines.append(c)
+    combined_dx = "\n".join(dx_lines).strip()
+
+    # Clean out lines that clearly look like labs/imaging/procedures/cultures accidentally in identity
+    _META_PATTERNS = (
+        _AGE_RE, _BED_RE,
+        _re.compile(r"^\s*(?:M|F|Masculino|Femenino|Hombre|Mujer)\s*$", _re.IGNORECASE),
+        _re.compile(r"^\s*Tratante\s*[:\-].*", _re.IGNORECASE),
+        _re.compile(r"^\s*(?:Alergias?|APNP|APP|Antecedentes|Medicamentos?|Meds?)\s*[:\-].*", _re.IGNORECASE),
+        _re.compile(r"^\s*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\s*$"),  # bare date lines
+    )
+    kept: list[str] = []
+    for line in combined_dx.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        if _cell_classification_score(s) > 0:
+            continue  # skip: it's really a clinical line
+        # Skip if the line is JUST meta (age/sex/bed/tratante/allergies/meds/date alone)
+        is_meta = False
+        for pat in _META_PATTERNS:
+            if pat.fullmatch(s) or (pat.search(s) and len(s) < 30 and (_AGE_RE.search(s) or _BED_RE.search(s))):
+                is_meta = True
+                break
+        # Extra guard: if the whole line is just "62 años M" or "S81 62 años" etc.
+        if _AGE_RE.search(s) and (_SEX_RE.search(s) or _BED_RE.search(s)) and len(s) < 40:
+            is_meta = True
+        if is_meta:
+            continue
+        # Also skip a line if it is exactly the patient name
+        if name and s.upper() == name.upper():
+            continue
+        kept.append(s)
+    if kept:
+        p["dx_short"] = kept[0][:200]
+        p["dx_full"] = "\n".join(kept)[:2000]
+
+    # ---- Classify column 5 (clinical bulk) into daily entry buckets ----
+    if clinical_text:
+        buckets = _classify_col5_text(clinical_text)
+        p["labs"] = buckets["labs"]
+        p["studies"] = buckets["studies"]
+        p["procedures"] = buckets["procedures"]
+        p["cultures"] = buckets["cultures"]
+        if buckets["events"]:
+            p["events"] = buckets["events"]
+
+    return p
+
+
+def _parse_censo_docx_deterministic(content: bytes) -> list[dict]:
+    """Parse .docx census PURELY with python-docx + regex. NO GPT calls."""
+    buf = io.BytesIO(content)
+    doc = DocxDocument(buf)
+    patients: list[dict] = []
+    for table in doc.tables:
+        rows = list(table.rows)
+        if not rows:
+            continue
+        # Skip header row if it contains labels like "Nombre" / "Cama" / "Diagnóstico"
+        start = 0
+        header = " ".join(c.text for c in rows[0].cells).lower()
+        if any(kw in header for kw in ("nombre", "paciente", "cama", "diagn", "cirug", "tratante", "servicio")):
+            start = 1
+        for row in rows[start:]:
+            cells = []
+            for cell in row.cells:
+                # Preserve per-paragraph newlines within a cell
+                lines = [p.text for p in cell.paragraphs if p.text.strip()]
+                cells.append("\n".join(lines))
+            try:
+                p = _parse_row_deterministic(cells)
+            except Exception:
+                logger.exception("Deterministic parse failed on row")
+                continue
+            if p and p.get("name"):
+                patients.append(p)
     return patients
 
 
@@ -924,15 +1014,14 @@ async def import_censo(
     confirm: bool = False,
     user: dict = Depends(get_user),
 ):
-    """Kick off async census import job. If confirm=false → preview mode (no changes applied)."""
+    """Kick off async census import job. Parsing is 100% DETERMINISTIC (no GPT)."""
     filename = (file.filename or "").lower()
     if not filename.endswith(".docx"):
         raise HTTPException(status_code=400, detail="El archivo debe ser un .docx")
     try:
         content = await file.read()
-        raw_text = _extract_docx_text(content)
-        if not raw_text or len(raw_text.strip()) < 20:
-            raise HTTPException(status_code=400, detail="El documento parece estar vacío.")
+        if not content:
+            raise HTTPException(status_code=400, detail="Archivo vacío")
     except HTTPException:
         raise
     except Exception as e:
@@ -947,7 +1036,7 @@ async def import_censo(
         "result": None,
         "error": None,
     }
-    asyncio.create_task(_run_import_job(job_id, raw_text, user["id"], confirm))
+    asyncio.create_task(_run_import_job(job_id, content, user["id"], confirm))
     return {"job_id": job_id, "status": "running", "confirm": confirm}
 
 
@@ -967,18 +1056,25 @@ async def import_censo_status(job_id: str, user: dict = Depends(get_user)):
     }
 
 
-async def _run_import_job(job_id: str, raw_text: str, user_id: str, confirm: bool):
-    """Background task that parses the census with GPT and (optionally) upserts patients."""
+async def _run_import_job(job_id: str, content_bytes: bytes, user_id: str, confirm: bool):
+    """Background task that parses the census with the DETERMINISTIC parser (no GPT) and (optionally) upserts."""
     try:
         errors: list[str] = []
         try:
-            parsed = await _parse_censo_with_gpt(raw_text)
+            parsed = _parse_censo_docx_deterministic(content_bytes)
         except Exception as e:
-            logger.exception("GPT parsing failed for job %s", job_id)
+            logger.exception("Deterministic parsing failed for job %s", job_id)
             IMPORT_JOBS[job_id] = {
                 **IMPORT_JOBS[job_id],
                 "status": "failed",
-                "error": f"Error al analizar el censo con IA: {str(e)[:300]}",
+                "error": f"Error al leer el .docx: {str(e)[:300]}",
+            }
+            return
+        if not parsed:
+            IMPORT_JOBS[job_id] = {
+                **IMPORT_JOBS[job_id],
+                "status": "failed",
+                "error": "No se detectaron tablas de pacientes en el .docx.",
             }
             return
 
