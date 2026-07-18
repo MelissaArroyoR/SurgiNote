@@ -69,6 +69,12 @@ Días de estancia (DEA) y días postoperatorios (DPQ) se calculan al vuelo desde
 - ✅ **Bug fix**: POST /api/patients tolerante a body sin `is_surgical`/`is_pending_discharge` (filtramos None antes del spread).
 - ✅ Tests: `/app/tests/test_parser_etapa3.py` (unitario) + `/app/backend/tests/test_etapa3.py` (integración 12/12).
 
+### 2026-02-XX — Prompt 4 (Aprendizaje definitivo de estilo — few-shot permanente)
+- ✅ **Few-shot builtin permanente** (`/app/backend/style_examples.py`): ejemplos reales del servicio de Cirugía General del Hospital Ángeles, embebidos como referencia interna de estilo (invisibles al usuario). 4 ejemplos de HOSPITALIZACIÓN, 3 de UTI/UTIM, 5 de WhatsApp.
+- ✅ **Prompts rediseñados** para `generate/note` y `generate/no-changes`: system prompt tipo R3 del Hospital Ángeles, format rules específicas por tipo (Piso/UTI), few-shots builtin + user examples concatenados.
+- ✅ **WhatsApp corregido**: capitalización NORMAL (no mayúsculas), saludos flexibles ("Buenos días doctor", "Hola doctor buenos días", "Pasé a ver a", "Buenos días doctores"), un solo párrafo corrido, cierres naturales ("Quedo al pendiente", "Lindo día doc!", "Saludos y bonito día"). Preguntas al tratante SOLO si hay decisión pendiente.
+- ✅ **Test funcional**: `/app/tests/test_prompt4_style.py` genera nota Piso + nota UTI + 2 WhatsApp reales y valida encabezados, secciones por sistemas (UTI), mayúsculas para MedSys, capitalización normal para WhatsApp, ausencia de bullets/numeración. **PASSED** en 8-11 s por generación.
+
 ## Backlog (P1 / P2)
 
 ### P1
