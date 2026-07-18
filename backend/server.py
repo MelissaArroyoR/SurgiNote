@@ -161,6 +161,8 @@ class DailyEntry(BaseModel):
     dictation: str = ""
     labs: str = ""
     studies: str = ""
+    procedures: str = ""
+    cultures: str = ""
     events: str = ""
     ai_pase_summary: Optional[str] = None
     ai_lab_comparison: Optional[str] = None
@@ -176,6 +178,8 @@ class DailyEntryUpsert(BaseModel):
     dictation: Optional[str] = None
     labs: Optional[str] = None
     studies: Optional[str] = None
+    procedures: Optional[str] = None
+    cultures: Optional[str] = None
     events: Optional[str] = None
 
 
@@ -270,19 +274,46 @@ async def list_discharged(user: dict = Depends(get_user)):
     return patients
 
 
+import re as _re
+
+_BED_SUITE_RE = _re.compile(r"^S(\d)(\d+)$", _re.IGNORECASE)
+_BED_ROOM_RE = _re.compile(r"^(\d)(\d{2,})$")
+
+
+def _bed_sort_key(bed: Optional[str]):
+    """Physical hospital order:
+    - Descending floor (piso 8, 7, 6, ...)
+    - Within each floor: SUITES first (S81, S82, S83), then normal rooms (800, 801, 802)
+    - Patients without a valid bed number go last.
+    Bed format examples:
+      'S81' -> floor=8, suite=True, num=1
+      '800' -> floor=8, suite=False, num=0
+      'Dajer' or other -> unranked
+    """
+    if not bed:
+        return (999, 9, 999999, "")
+    b = str(bed).strip().upper()
+    m = _BED_SUITE_RE.match(b)
+    if m:
+        floor = int(m.group(1))
+        num = int(m.group(2))
+        return (-floor, 0, num, b)  # suite = 0 (first within floor)
+    m = _BED_ROOM_RE.match(b)
+    if m:
+        floor = int(m.group(1))
+        num = int(m.group(2))
+        return (-floor, 1, num, b)  # normal room = 1 (after suites)
+    return (999, 9, 999999, b)
+
+
 @api.get("/patients")
 async def list_patients(user: dict = Depends(get_user)):
     cur = db.patients.find({"user_id": user["id"], "active": True}, {"_id": 0})
     patients = await cur.to_list(500)
     for p in patients:
         enrich_patient(p)
-    # Preserve censo order (from last import). Patients without censo_order go to end sorted alphabetically.
-    def _key(p):
-        co = p.get("censo_order")
-        if co is None:
-            return (1, (p.get("name") or "").lower())
-        return (0, co)
-    patients.sort(key=_key)
+    # PHYSICAL hospital order: suites first per floor (descending floors).
+    patients.sort(key=lambda p: _bed_sort_key(p.get("bed")))
     return patients
 
 
@@ -650,7 +681,7 @@ CENSO_FIELDS = [
     "is_surgical", "is_pending_discharge",
 ]
 
-CENSO_DAILY_FIELDS = ["labs", "studies", "events"]
+CENSO_DAILY_FIELDS = ["labs", "studies", "procedures", "cultures", "events"]
 
 
 def _extract_docx_text(content: bytes) -> str:
@@ -711,9 +742,11 @@ Devuelve un objeto JSON con esta forma exacta:
       "unit_classification": "UTI" | "UTIM" | "Piso",
       "is_surgical": true | false,
       "is_pending_discharge": true | false,
-      "labs": "Todos los laboratorios recientes del paciente en el censo (Hb, leucocitos, plaquetas, Cr, electrolitos, PCR, etc.)",
-      "studies": "Estudios de imagen y procedimientos recientes (USG, TAC, endoscopias, RMN, etc.)",
-      "events": "Hallazgos importantes / eventos relevantes / cambios clínicos del día mencionados en el censo"
+      "labs": "SOLO laboratorios: LABS/BH/QS/ES/PFH/TP/TTP/PCR/procalcitonina/GASA/GASV/EGO/hormonas/marcadores. Copiar el bloque LITERAL sin resumir. Un valor por línea o como venga.",
+      "studies": "SOLO estudios de imagen: RXTX, TAC, ANGIOTAC, RM, USG, PET-CT, ECG, SEGD, MASTOGRAFÍA, RMN, tomografía, ecocardiograma. Copiar el bloque literal.",
+      "procedures": "SOLO procedimientos: colonoscopia, endoscopia, RHP, biopsia, drenaje, paracentesis, toracocentesis, procedimientos varios NO quirúrgicos mayores. Copiar el bloque literal.",
+      "cultures": "SOLO cultivos y microbiología: Cultivos, Gram, Hemocultivos, urocultivos, cultivo herida, susceptibilidad, desarrollo, aislamiento. Copiar el bloque literal.",
+      "events": "Eventos clínicos del día / cambios / notas libres del residente (NO laboratorios, NO estudios, NO procedimientos, NO cultivos)."
     }}
   ]
 }}
@@ -725,11 +758,27 @@ Reglas ESTRICTAS:
 4. name es OBLIGATORIO. Sin nombre válido, omite ese paciente.
 5. `attending_physician`: SOLO el médico TRATANTE / adscrito responsable del paciente (buscar palabras clave: "Tratante", "Adscrito", "Dr.", "Dra." junto al paciente). NUNCA incluir aquí interconsultantes.
 6. NO extraigas interconsultantes. NO devuelvas el campo "consultants". El usuario los capturará manualmente.
-7. `is_surgical`: true si el paciente tiene procedimiento quirúrgico realizado o programado; false si es paciente no quirúrgico (manejo médico, en observación por otro servicio, sin cirugía en el episodio actual).
+7. `is_surgical`: true si el paciente tiene procedimiento quirúrgico realizado o programado; false si es paciente no quirúrgico.
 8. `is_pending_discharge`: true si el censo menciona "alta pendiente", "en espera de alta", "alta hoy", "candidato a egreso"; false en cualquier otro caso.
 9. `unit_classification`: "UTI" si Terapia Intensiva; "UTIM" si Terapia Intermedia; "Piso" en cualquier otro caso.
-10. `labs`, `studies`, `events`: extrae TODO el contenido clínico de la columna correspondiente del censo (quinta columna o similar). Esta información se usará para el pase del día. NO omitas ninguna información clínica útil aunque parezca larga.
-11. Devuelve SOLO el JSON, sin ```json``` ni explicaciones."""
+
+10. RUTEO ESTRICTO DE LA QUINTA COLUMNA CLÍNICA (MUY IMPORTANTE):
+   - LABORATORIOS → SIEMPRE al campo `labs`. Palabras clave: LABS, BH, QS, ES, PFH, TP, TTP, PCR, procalcitonina, GASA, GASV, EGO, marcadores tumorales, hormonas.
+   - ESTUDIOS DE IMAGEN → SIEMPRE al campo `studies`. Palabras clave: RXTX, TAC, ANGIOTAC, RM, RMN, USG, PET-CT, ECG, ECOCARDIOGRAMA, SEGD, MASTOGRAFÍA, tomografía.
+   - PROCEDIMIENTOS → SIEMPRE al campo `procedures`. Palabras clave: colonoscopia, endoscopia, RHP, biopsia, drenaje, paracentesis, toracocentesis, procedimiento X (excepto cirugía mayor que ya está en surgery_procedure).
+   - CULTIVOS → SIEMPRE al campo `cultures`. Palabras clave: Cultivos, Gram, Hemocultivos, urocultivo, cultivo de herida, susceptibilidad, desarrollo, aislamiento.
+   - HALLAZGOS QUIRÚRGICOS → SIEMPRE al campo `surgery_findings`. Palabras clave: Hallazgos, HTQ.
+   - EVENTOS del día / notas libres → al campo `events`.
+
+11. PROHIBICIONES ABSOLUTAS:
+   - `dx_short` y `dx_full` deben contener ÚNICAMENTE diagnósticos médicos (nombre del padecimiento, estadio, complicación diagnóstica).
+   - NUNCA colocar en `dx_short` o `dx_full`: resultados de TAC, USG, RX, RM, colonoscopia, endoscopia, RHP, laboratorios, hallazgos quirúrgicos.
+   - Ejemplo INCORRECTO — `dx_full`: "TAC: engrosamiento…" ❌
+   - Ejemplo CORRECTO — `dx_full`: "Colitis en estudio" ✅  y el resultado del TAC va a `studies`.
+   - NUNCA colocar hallazgos quirúrgicos en `dx_short` ni `dx_full` — van solo en `surgery_findings`.
+
+12. Copia el contenido de cada bloque LITERALMENTE, sin resumir ni reformular. No agregues comentarios.
+13. Devuelve SOLO el JSON, sin ```json``` ni explicaciones."""
 
     text = await llm_generate(system, prompt)
     # Strip potential markdown fences
@@ -925,11 +974,13 @@ async def _run_import_job(job_id: str, raw_text: str, user_id: str, confirm: boo
 
 
 async def _upsert_daily_from_censo(patient_id: str, user_id: str, target_date: str, entry: dict):
-    """Merge labs/studies/events from a census row into the day's daily_entry (append, don't overwrite)."""
+    """Merge labs/studies/procedures/cultures/events from a census row into the day's daily_entry (append, don't overwrite)."""
     labs = entry.get("labs")
     studies = entry.get("studies")
+    procedures = entry.get("procedures")
+    cultures = entry.get("cultures")
     events = entry.get("events")
-    if not any([labs, studies, events]):
+    if not any([labs, studies, procedures, cultures, events]):
         return
     existing = await db.daily_entries.find_one(
         {"patient_id": patient_id, "user_id": user_id, "date": target_date}
@@ -938,12 +989,17 @@ async def _upsert_daily_from_censo(patient_id: str, user_id: str, target_date: s
     if not existing:
         de = DailyEntry(
             patient_id=patient_id, user_id=user_id, date=target_date,
-            labs=labs or "", studies=studies or "", events=events or "",
+            labs=labs or "", studies=studies or "",
+            procedures=procedures or "", cultures=cultures or "",
+            events=events or "",
         )
         await db.daily_entries.insert_one(de.model_dump())
         return
     update = {"updated_at": now_iso}
-    for field, val in (("labs", labs), ("studies", studies), ("events", events)):
+    for field, val in (
+        ("labs", labs), ("studies", studies), ("procedures", procedures),
+        ("cultures", cultures), ("events", events),
+    ):
         if not val:
             continue
         existing_val = (existing.get(field) or "").strip()

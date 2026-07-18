@@ -4,13 +4,10 @@ import { toast } from "sonner";
 import {
   ArrowLeft, Pencil, BedDouble, UserRound, Calendar, Activity,
   ClipboardCheck, Sparkles, Copy, Trash2, ChevronDown, ChevronUp,
-  Clock, Zap, FileText, MessageSquarePlus, X, Loader2, ClipboardList,
+  Clock, Zap,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Textarea } from "@/components/ui/textarea";
-import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
 import PatientFormDialog from "@/components/PatientFormDialog";
 import VoiceDictation from "@/components/VoiceDictation";
 
@@ -37,30 +34,25 @@ export default function PatientDetail() {
   const [patient, setPatient] = useState(null);
   const [entry, setEntry] = useState(null);
   const [entries, setEntries] = useState([]);
-  const [additional, setAdditional] = useState([]);
   const [expandedInfo, setExpandedInfo] = useState(false);
   const [editing, setEditing] = useState(false);
   const [generatingPase, setGeneratingPase] = useState(false);
   const [generatingNoChanges, setGeneratingNoChanges] = useState(false);
   const [pase, setPase] = useState("");
-  const [admissionOpen, setAdmissionOpen] = useState(false);
-  const [addlOpen, setAddlOpen] = useState(false);
   const [interconsultants, setInterconsultants] = useState("");
   const debounceRef = useRef(null);
   const interDebounceRef = useRef(null);
 
   const load = useCallback(async () => {
     try {
-      const [p, e, es, an] = await Promise.all([
+      const [p, e, es] = await Promise.all([
         api.getPatient(id),
         api.getTodayEntry(id),
         api.listEntries(id),
-        api.listAdditionalNotes(id).catch(() => []),
       ]);
       setPatient(p);
       setEntry(e);
       setEntries(es);
-      setAdditional(an);
       setPase(e.ai_pase_summary || "");
       setInterconsultants(p.consultants || "");
     } catch {
@@ -212,17 +204,7 @@ export default function PatientDetail() {
             rows={2}
             className={fieldCls}
           />
-          <p className="text-[11px] text-slate-500">Este campo se guarda pero NO se usa para generar pases, notas o mensajes.</p>
-        </div>
-
-        <div className="mt-4 pt-4 border-t border-slate-200 flex flex-col gap-2">
-          <button
-            data-testid="btn-open-admission-note"
-            onClick={() => setAdmissionOpen(true)}
-            className="w-full h-12 rounded-lg bg-white border border-blue-200 text-blue-700 font-semibold text-sm flex items-center justify-center gap-2 hover:bg-blue-50 transition-colors"
-          >
-            <FileText className="w-4 h-4" /> {patient.admission_note_text ? "Ver / editar nota de ingreso" : "Agregar nota de ingreso"}
-          </button>
+          <p className="text-[11px] text-slate-500">Se guarda pero NO se usa para generar pases, notas, WhatsApp ni sugerencias de IA.</p>
         </div>
       </div>
 
@@ -261,9 +243,21 @@ export default function PatientDetail() {
         </div>
 
         <div className="mb-3">
-          <div className="text-xs font-bold uppercase tracking-widest text-blue-600 mb-1.5">Estudios / procedimientos</div>
+          <div className="text-xs font-bold uppercase tracking-widest text-blue-600 mb-1.5">Estudios de imagen</div>
           <Textarea data-testid="input-studies" value={entry.studies} onChange={(e) => patchEntry({ studies: e.target.value })}
-            placeholder="Pega o describe estudios de imagen, endoscopias…" rows={3} className={fieldCls} />
+            placeholder="RXTX, TAC, ANGIOTAC, RM, USG, PET-CT, ECG, SEGD…" rows={3} className={fieldCls} />
+        </div>
+
+        <div className="mb-3">
+          <div className="text-xs font-bold uppercase tracking-widest text-blue-600 mb-1.5">Procedimientos</div>
+          <Textarea data-testid="input-procedures" value={entry.procedures || ""} onChange={(e) => patchEntry({ procedures: e.target.value })}
+            placeholder="Colonoscopia, endoscopia, RHP, drenaje, paracentesis…" rows={3} className={fieldCls} />
+        </div>
+
+        <div className="mb-3">
+          <div className="text-xs font-bold uppercase tracking-widest text-blue-600 mb-1.5">Cultivos</div>
+          <Textarea data-testid="input-cultures" value={entry.cultures || ""} onChange={(e) => patchEntry({ cultures: e.target.value })}
+            placeholder="Cultivos, Gram, hemocultivos, susceptibilidad, desarrollo…" rows={3} className={fieldCls} />
         </div>
 
         <div className="mb-5">
@@ -304,41 +298,6 @@ export default function PatientDetail() {
         )}
       </div>
 
-      {/* Notas adicionales */}
-      <div className="mb-6">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <ClipboardList className="w-4 h-4 text-blue-600" />
-            <h3 className="font-heading font-bold text-base text-slate-900">Notas adicionales</h3>
-          </div>
-          <button
-            data-testid="btn-open-additional"
-            onClick={() => setAddlOpen(true)}
-            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors"
-          >
-            <MessageSquarePlus className="w-3.5 h-3.5" /> Agregar
-          </button>
-        </div>
-        {additional.length === 0 ? (
-          <p className="text-slate-500 text-xs bg-slate-50 border border-dashed border-slate-200 rounded-lg p-4 text-center">
-            Notas de otros servicios (Medicina Interna, UTI, Oncología…) con resumen IA. No modifican la información fija.
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {additional.map((n) => (
-              <AdditionalNoteCard key={n.id} note={n} onDelete={async () => {
-                if (!window.confirm("¿Eliminar esta nota?")) return;
-                try {
-                  await api.deleteAdditionalNote(id, n.id);
-                  setAdditional(a => a.filter(x => x.id !== n.id));
-                  toast.success("Nota eliminada");
-                } catch { toast.error("Error"); }
-              }} />
-            ))}
-          </div>
-        )}
-      </div>
-
       {/* Timeline */}
       {entries.length > 0 && (
         <div className="mt-6">
@@ -366,164 +325,6 @@ export default function PatientDetail() {
 
       <PatientFormDialog open={editing} onOpenChange={setEditing} patient={patient}
         onSaved={() => { setEditing(false); load(); }} />
-
-      <AdmissionNoteDialog open={admissionOpen} onOpenChange={setAdmissionOpen} patient={patient}
-        onSaved={() => { setAdmissionOpen(false); load(); }} />
-
-      <AdditionalNoteDialog open={addlOpen} onOpenChange={setAddlOpen} patientId={id}
-        onCreated={(n) => { setAdditional(a => [n, ...a]); setAddlOpen(false); }} />
     </div>
-  );
-}
-
-function AdditionalNoteCard({ note, onDelete }) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <div className="bg-white border border-slate-200 rounded-lg p-3" data-testid={`additional-note-${note.id}`}>
-      <div className="flex items-center justify-between mb-2">
-        <div>
-          <div className="text-xs font-bold text-blue-600 uppercase tracking-widest">{note.source}</div>
-          <div className="text-[10px] text-slate-500">{note.created_at?.split("T")[0]}</div>
-        </div>
-        <div className="flex gap-1">
-          <button onClick={() => copyText(note.ai_summary || note.text)}
-            className="w-8 h-8 rounded-full border border-slate-200 flex items-center justify-center text-slate-500 hover:text-blue-600 hover:border-blue-500">
-            <Copy className="w-3 h-3" />
-          </button>
-          <button onClick={onDelete}
-            className="w-8 h-8 rounded-full border border-slate-200 flex items-center justify-center text-slate-500 hover:text-red-600 hover:border-red-500">
-            <X className="w-3 h-3" />
-          </button>
-        </div>
-      </div>
-      {note.ai_summary && (
-        <div className="text-slate-800 text-sm leading-relaxed pre-wrap font-mono">{note.ai_summary}</div>
-      )}
-      <button onClick={() => setExpanded(v => !v)} className="mt-2 text-[11px] text-slate-500 hover:text-blue-600">
-        {expanded ? "Ocultar" : "Ver"} texto original
-      </button>
-      {expanded && (
-        <div className="mt-2 text-slate-600 text-xs leading-snug pre-wrap p-2 bg-slate-50 rounded border border-slate-200">{note.text}</div>
-      )}
-    </div>
-  );
-}
-
-function AdmissionNoteDialog({ open, onOpenChange, patient, onSaved }) {
-  const [text, setText] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => { if (open) setText(patient?.admission_note_text || ""); }, [open, patient]);
-
-  const save = async () => {
-    if (text.trim().length < 20) { toast.error("La nota es demasiado corta"); return; }
-    setLoading(true);
-    try {
-      const res = await api.pasteAdmissionNote(patient.id, text);
-      const n = (res.merged_fields || []).length;
-      toast.success(n > 0 ? `Nota guardada. ${n} campo${n > 1 ? "s" : ""} extraído${n > 1 ? "s" : ""}.` : "Nota guardada.");
-      if (res.warning) toast.error(res.warning);
-      onSaved?.();
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || "Error al guardar");
-    } finally { setLoading(false); }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-white border-slate-200 text-slate-900 max-w-2xl max-h-[92vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="font-heading text-xl flex items-center gap-2">
-            <FileText className="w-5 h-5 text-blue-600" /> Nota de ingreso
-          </DialogTitle>
-        </DialogHeader>
-        <p className="text-slate-600 text-sm">
-          Pega la nota de ingreso completa desde MedSys. La IA extraerá automáticamente motivo de ingreso, padecimiento actual, dx, antecedentes, alergias, medicamentos, cirugías y estado oncológico. Nunca borra información previa.
-        </p>
-        <Textarea
-          data-testid="input-admission-note"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          rows={16}
-          placeholder="Pega aquí la nota de ingreso completa desde MedSys…"
-          className="bg-white border-slate-300 text-slate-900 font-mono text-sm focus-visible:ring-blue-500"
-        />
-        <div className="flex gap-3">
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}
-            className="flex-1 h-12 bg-white border-slate-300 text-slate-700 hover:bg-slate-50">Cancelar</Button>
-          <Button
-            data-testid="btn-save-admission-note"
-            onClick={save} disabled={loading}
-            className="flex-1 h-12 bg-blue-600 hover:bg-blue-700 text-white font-bold">
-            {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Guardando…</> : "Guardar y analizar"}
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function AdditionalNoteDialog({ open, onOpenChange, patientId, onCreated }) {
-  const [source, setSource] = useState("");
-  const [text, setText] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => { if (open) { setSource(""); setText(""); } }, [open]);
-
-  const save = async () => {
-    if (!source.trim()) { toast.error("Indica el servicio"); return; }
-    if (text.trim().length < 20) { toast.error("La nota es demasiado corta"); return; }
-    setLoading(true);
-    try {
-      const res = await api.addAdditionalNote(patientId, source.trim(), text);
-      toast.success("Nota agregada y resumida");
-      if (res.warning) toast.error(res.warning);
-      onCreated?.(res.note);
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || "Error al guardar");
-    } finally { setLoading(false); }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-white border-slate-200 text-slate-900 max-w-2xl max-h-[92vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="font-heading text-xl flex items-center gap-2">
-            <ClipboardList className="w-5 h-5 text-blue-600" /> Nota de otro servicio
-          </DialogTitle>
-        </DialogHeader>
-        <p className="text-slate-600 text-sm">
-          Pega una nota de Medicina Interna, UTI, Oncología, Infectología, etc. La IA generará un resumen ejecutivo (dx, cambios, recomendaciones, pendientes). No modifica la información fija del paciente.
-        </p>
-        <div>
-          <div className="text-xs font-semibold text-slate-700 mb-1.5">Servicio</div>
-          <Input
-            data-testid="input-note-source"
-            value={source}
-            onChange={(e) => setSource(e.target.value)}
-            placeholder="Ej. Medicina Interna, UTI, Oncología, Nutrición, Infectología"
-            className="bg-white border-slate-300 text-slate-900 focus-visible:ring-blue-500"
-          />
-        </div>
-        <Textarea
-          data-testid="input-additional-note"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          rows={14}
-          placeholder="Pega aquí la nota completa del servicio…"
-          className="bg-white border-slate-300 text-slate-900 font-mono text-sm focus-visible:ring-blue-500"
-        />
-        <div className="flex gap-3">
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}
-            className="flex-1 h-12 bg-white border-slate-300 text-slate-700 hover:bg-slate-50">Cancelar</Button>
-          <Button
-            data-testid="btn-save-additional-note"
-            onClick={save} disabled={loading}
-            className="flex-1 h-12 bg-blue-600 hover:bg-blue-700 text-white font-bold">
-            {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Analizando…</> : "Guardar y resumir"}
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }
