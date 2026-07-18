@@ -1,5 +1,5 @@
 import { Outlet, NavLink, useLocation } from "react-router-dom";
-import { Users, FileText, ClipboardList, LogIn, LogOut } from "lucide-react";
+import { Users, FileText, ClipboardList, LogIn, LogOut, Settings } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 
 const tabs = [
@@ -7,6 +7,7 @@ const tabs = [
   { to: "/pase", label: "Pase", Icon: ClipboardList, testid: "tab-pase" },
   { to: "/notas", label: "Notas", Icon: FileText, testid: "tab-notas" },
   { to: "/ingresos", label: "Ingresos", Icon: LogIn, testid: "tab-ingresos" },
+  { to: "/configuracion", label: "Config", Icon: Settings, testid: "tab-configuracion" },
 ];
 
 export default function Shell() {
@@ -48,7 +49,7 @@ export default function Shell() {
         className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-slate-200 pb-safe"
         data-testid="bottom-nav"
       >
-        <div className="max-w-3xl mx-auto grid grid-cols-4 h-20">
+        <div className="max-w-3xl mx-auto grid grid-cols-5 h-20">
           {tabs.map(({ to, label, Icon, testid }) => (
             <NavLink
               key={to}

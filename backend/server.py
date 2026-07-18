@@ -263,6 +263,45 @@ async def login(body: UserLogin):
     return AuthResponse(token=token, user={"id": user["id"], "email": user["email"], "name": user["name"]})
 
 
+# ---------------- Training Examples (Configuración → Entrenamiento de IA) ----------------
+class TrainingExamples(BaseModel):
+    hospital_notes_examples: str = ""
+    uti_notes_examples: str = ""
+    whatsapp_examples: str = ""
+
+
+@api.get("/training-examples", response_model=TrainingExamples)
+async def get_training_examples(user: dict = Depends(get_user)):
+    doc = await db.training_examples.find_one({"user_id": user["id"]}, {"_id": 0}) or {}
+    return TrainingExamples(
+        hospital_notes_examples=doc.get("hospital_notes_examples", ""),
+        uti_notes_examples=doc.get("uti_notes_examples", ""),
+        whatsapp_examples=doc.get("whatsapp_examples", ""),
+    )
+
+
+@api.put("/training-examples", response_model=TrainingExamples)
+async def update_training_examples(body: TrainingExamples, user: dict = Depends(get_user)):
+    await db.training_examples.update_one(
+        {"user_id": user["id"]},
+        {"$set": {
+            "user_id": user["id"],
+            "hospital_notes_examples": (body.hospital_notes_examples or "").strip(),
+            "uti_notes_examples": (body.uti_notes_examples or "").strip(),
+            "whatsapp_examples": (body.whatsapp_examples or "").strip(),
+            "updated_at": now_utc().isoformat(),
+        }},
+        upsert=True,
+    )
+    return body
+
+
+async def _get_training_examples(user_id: str) -> dict:
+    """Fetch user's training examples. Returns {} if none configured."""
+    doc = await db.training_examples.find_one({"user_id": user_id}, {"_id": 0})
+    return doc or {}
+
+
 @api.get("/auth/me")
 async def me(user: dict = Depends(get_user)):
     return user
@@ -440,6 +479,37 @@ class GenerateBody(BaseModel):
     date: Optional[str] = None
 
 
+def _is_uti_patient(patient: dict) -> bool:
+    unit = (patient.get("unit_classification") or "").strip().upper()
+    return unit in ("UTI", "UTIM", "TERAPIA", "TERAPIA INTENSIVA", "UCI", "UCIM")
+
+
+def _style_block(examples: str, kind: str) -> str:
+    """Build a style-reference block for the LLM prompt. Never copy verbatim."""
+    if not examples or not examples.strip():
+        return ""
+    return (
+        f"\n\nEJEMPLOS DE ESTILO DE {kind} (SOLO REFERENCIA — NUNCA COPIAR NOMBRES, DIAGNÓSTICOS, "
+        f"FECHAS NI FRASES COMPLETAS; ÚNICAMENTE APRENDER ESTRUCTURA, VOCABULARIO Y FORMA DE REDACTAR "
+        f"COMO UN RESIDENTE R3 DE CIRUGÍA GENERAL):\n"
+        f"<<<INICIO_EJEMPLOS>>>\n{examples.strip()}\n<<<FIN_EJEMPLOS>>>\n"
+    )
+
+
+def _extract_dr_lastname(attending: Optional[str]) -> str:
+    """Extract 'Apellido' from something like 'Dr. Juan Pérez López' → 'Pérez'."""
+    if not attending:
+        return "________"
+    s = _re.sub(r"^\s*(dra?\.?|dr\.?)\s+", "", attending.strip(), flags=_re.IGNORECASE)
+    parts = [w for w in s.split() if w]
+    if not parts:
+        return "________"
+    # Take second word (surname) if pattern is Name Surname, else first
+    if len(parts) >= 2:
+        return parts[1].upper()
+    return parts[0].upper()
+
+
 @api.post("/patients/{patient_id}/generate/pase")
 async def generate_pase(patient_id: str, body: GenerateBody, user: dict = Depends(get_user)):
     patient = await db.patients.find_one({"id": patient_id, "user_id": user["id"]}, {"_id": 0})
@@ -545,93 +615,115 @@ async def generate_note(patient_id: str, body: GenerateBody, user: dict = Depend
     target = body.date or today_iso()
     entry = await db.daily_entries.find_one(
         {"patient_id": patient_id, "user_id": user["id"], "date": target}, {"_id": 0}
-    ) or {"dictation": "", "labs": "", "studies": "", "events": ""}
+    ) or {"dictation": "", "labs": "", "studies": "", "procedures": "", "cultures": "", "vital_signs": "", "events": ""}
 
     ctx = build_patient_context(patient)
-    user_prompt = f"""INFORMACIÓN FIJA DEL PACIENTE:
-{ctx}
+    is_uti = _is_uti_patient(patient)
+    training = await _get_training_examples(user["id"])
+    style_examples = training.get("uti_notes_examples" if is_uti else "hospital_notes_examples", "")
+    style_block = _style_block(style_examples, "NOTAS DE UTI/UTIM" if is_uti else "NOTAS DE HOSPITALIZACIÓN")
 
-INFORMACIÓN DEL DÍA ({target}):
-- Dictado: {entry.get('dictation', '')}
-- Laboratorios: {entry.get('labs', '')}
-- Estudios: {entry.get('studies', '')}
-- Eventos: {entry.get('events', '')}
+    plantilla = "UTI/UTIM" if is_uti else "PISO"
 
-Redacta una NOTA DE EVOLUCIÓN completa en español clínico, LISTA PARA COPIAR Y PEGAR EN MEDSYS, siguiendo EXACTAMENTE este formato en texto plano (sin markdown, sin asteriscos, sin comillas extra):
+    data_block = (
+        f"INFORMACIÓN FIJA DEL PACIENTE:\n{ctx}\n\n"
+        f"INFORMACIÓN CLÍNICA DEL DÍA ({target}):\n"
+        f"- DICTADO DEL RESIDENTE: {entry.get('dictation', '') or 'SIN DICTADO NUEVO.'}\n"
+        f"- LABORATORIOS: {entry.get('labs', '') or 'SIN LABORATORIOS.'}\n"
+        f"- ESTUDIOS DE IMAGEN: {entry.get('studies', '') or 'SIN ESTUDIOS.'}\n"
+        f"- PROCEDIMIENTOS: {entry.get('procedures', '') or 'SIN PROCEDIMIENTOS.'}\n"
+        f"- CULTIVOS: {entry.get('cultures', '') or 'SIN CULTIVOS.'}\n"
+        f"- SIGNOS VITALES: {entry.get('vital_signs', '') or 'ND.'}\n"
+        f"- CAMBIOS DE INDICACIONES: {entry.get('indications_changes', '') or 'SIN CAMBIOS.'}\n"
+        f"- EVENTOS Y PENDIENTES: {entry.get('events', '') or 'SIN EVENTOS ADICIONALES.'}\n"
+    )
 
-NOTA DE EVOLUCIÓN — {target}
-Servicio: Cirugía General
+    if is_uti:
+        skeleton = (
+            "NOTA DE EVOLUCIÓN EN UTI/UTIM — CIRUGÍA GENERAL — {DATE}\n\n"
+            "SUBJETIVO: (UN PÁRRAFO CORRIDO DESCRIBIENDO EL DÍA DEL PACIENTE, EN LENGUAJE DE R3.)\n\n"
+            "NEUROLÓGICO: (SEDACIÓN, RASS, GLASGOW, PUPILAS.)\n"
+            "CARDIOVASCULAR: (TA, FC, RITMO, AMINAS, PERFUSIÓN.)\n"
+            "RESPIRATORIO: (MODO VENTILATORIO, FIO2, PEEP, SATURACIÓN O DESTETE.)\n"
+            "GASTROINTESTINAL / QUIRÚRGICO: (ABDOMEN, HERIDA, DRENAJES, GASTO, TOLERANCIA, EVACUACIONES.)\n"
+            "RENAL: (URESIS, BALANCE, CREATININA, ELECTROLITOS.)\n"
+            "INFECCIOSO: (FIEBRE, LEUCOCITOSIS, CULTIVOS, ANTIBIÓTICOS EN CURSO.)\n"
+            "HEMATOLÓGICO / METABÓLICO: (HB, PLAQUETAS, GLUCEMIAS, ALBÚMINA.)\n\n"
+            "EXPLORACIÓN FÍSICA: (PÁRRAFO CORRIDO EN MAYÚSCULAS, SIN LISTAS.)\n\n"
+            "LABORATORIOS Y ESTUDIOS DEL DÍA: (VALORES EN LÍNEA, CAMBIOS RELEVANTES VS PREVIO EN NARRATIVA.)\n\n"
+            "PLAN: (PÁRRAFO CORRIDO POR SISTEMAS. NUNCA USAR VIÑETAS NI NUMERACIÓN.)\n\n"
+            "PRONÓSTICO: (UNA SOLA LÍNEA.)\n"
+        ).replace("{DATE}", target)
+    else:
+        skeleton = (
+            "NOTA DE EVOLUCIÓN — CIRUGÍA GENERAL — {DATE}\n\n"
+            "PACIENTE: (NOMBRE, EDAD, SEXO). CAMA (CAMA). TRATANTE: (APELLIDO). "
+            "DEIH (X) DÍAS. DPQX (X) DÍAS.\n"
+            "DX: (DIAGNÓSTICO RESUMIDO).\n"
+            "QX: (PROCEDIMIENTO Y FECHA, SI APLICA).\n\n"
+            "SUBJETIVO Y EVOLUCIÓN: (UN PÁRRAFO CORRIDO, ESTILO R3, DESCRIBIENDO ESTADO, DOLOR, "
+            "TOLERANCIA A LA VÍA ORAL, EVACUACIONES, EVENTOS DE LAS ÚLTIMAS 24 HORAS. SIN LISTAS.)\n\n"
+            "EXPLORACIÓN FÍSICA: (PÁRRAFO CORRIDO EN MAYÚSCULAS. INCLUIR SIGNOS VITALES SI ESTÁN, ESTADO GENERAL, "
+            "CABEZA Y CUELLO, CARDIOPULMONAR, ABDOMEN CON HERIDA Y DRENAJES, EXTREMIDADES, NEUROLÓGICO. "
+            "USAR NARRATIVA, NUNCA VIÑETAS.)\n\n"
+            "LABORATORIOS Y ESTUDIOS: (NARRAR LOS VALORES DEL DÍA Y LOS CAMBIOS RELEVANTES VS PREVIO. "
+            "MENCIONAR ESTUDIOS DE IMAGEN Y PROCEDIMIENTOS EN LA MISMA NARRATIVA. SIN LISTAS.)\n\n"
+            "PLAN: (PÁRRAFO CORRIDO INCLUYENDO DIETA, MEDICAMENTOS, ANALGESIA, PROFILAXIS, MOVILIZACIÓN, "
+            "CURACIONES, RETIRO DE DISPOSITIVOS, INTERCONSULTAS Y PENDIENTES. NUNCA USAR NUMERACIÓN NI VIÑETAS.)\n\n"
+            "PRONÓSTICO: (UNA SOLA LÍNEA.)\n"
+        ).replace("{DATE}", target)
 
-ENCABEZADO
-Paciente: (nombre completo, edad, sexo)
-Cama / Piso: (cama · piso)
-Días de estancia: (DEA) | Días postoperatorios: (DPQ)
-Diagnóstico: (dx resumido)
-Cirugía: (fecha · procedimiento realizado)
-Antecedentes relevantes: (una línea; si no hay, escribe "Sin antecedentes de relevancia")
-Interconsultas activas: (lista; si no hay, escribe "Ninguna")
+    system = (
+        "Eres un RESIDENTE R3 DE CIRUGÍA GENERAL redactando una nota MedSys para copiar y pegar. "
+        "REGLAS DE ESTILO OBLIGATORIAS:\n"
+        "- TODO EL TEXTO EN MAYÚSCULAS (excepto números y símbolos).\n"
+        "- SIN LISTAS. SIN VIÑETAS. SIN NUMERACIÓN. TODO EN PÁRRAFOS CORRIDOS.\n"
+        "- SIN MARKDOWN, SIN ASTERISCOS, SIN GUIONES DE LISTA.\n"
+        "- NUNCA suenes como ChatGPT: escribe como un residente cansado, seguro, técnico, en frases cortas y directas.\n"
+        "- NUNCA inventes datos. Si un dato no existe, escribe 'ND' o simplemente omítelo cuando sea natural.\n"
+        "- Español médico profesional mexicano.\n"
+        "- La nota debe estar LISTA PARA COPIAR Y PEGAR a MedSys sin editar."
+    )
 
-EVOLUCIÓN
-(2-4 párrafos redactados con base en el dictado. Incluye lo subjetivo, lo objetivo del día, cambios de manejo, eventos relevantes, respuesta al tratamiento, comportamiento hemodinámico, ventilatorio, dolor, tolerancia a la vía oral, drenajes, herida quirúrgica cuando aplique.)
+    user_prompt = (
+        f"{data_block}\n"
+        f"PLANTILLA A USAR: {plantilla}\n\n"
+        f"REDACTA LA NOTA SIGUIENDO EXACTAMENTE ESTA ESTRUCTURA (RELLENA CADA SECCIÓN CON LOS DATOS DEL PACIENTE, "
+        f"EN MAYÚSCULAS Y SIN LISTAS):\n\n{skeleton}\n"
+        f"{style_block}"
+    )
 
-EXPLORACIÓN FÍSICA
-Signos vitales: (TA, FC, FR, T, SatO2 — solo si están en el dictado; si no, "ND")
-Estado general: (impresión clínica según dictado)
-Cabeza y cuello: (según dictado; si no, "sin alteraciones referidas")
-Cardiopulmonar: (según dictado)
-Abdomen: (según dictado — herida, ruidos, dolor, drenajes)
-Extremidades: (según dictado)
-Neurológico: (según dictado)
-
-LABORATORIOS Y ESTUDIOS
-Laboratorios del día: (organiza los valores del día en línea)
-Cambios relevantes: (bullets con las tendencias clínicamente importantes vs previos si el dictado los menciona)
-Estudios / procedimientos: (resumen; si no hay, "Sin estudios el día de hoy")
-
-PLAN
-1. (plan por problema/sistema, concreto y accionable)
-2. ...
-3. ...
-(Incluye: dieta, líquidos, medicamentos, analgesia, profilaxis, movilización, retiro de dispositivos, curaciones, interconsultas pendientes, estudios pendientes.)
-
-PRONÓSTICO
-(Una línea: reservado / bueno para la función / bueno para la vida — según corresponda clínicamente. Justifica en máximo una frase.)
-
-—
-Firma: Residente de Cirugía General
-
-Reglas estrictas:
-1. NO inventes datos, signos vitales, medicamentos, dosis, ni valores que no estén en el dictado/labs/eventos.
-2. Si un dato no está presente, escribe "ND" o "sin datos referidos".
-3. Español médico profesional.
-4. Formato texto plano sin markdown, listo para copiar y pegar."""
-    system = "Eres experto en redacción de notas médicas de cirugía general en español para el expediente MedSys. Produces notas profesionales, precisas, con formato ENCABEZADO / EVOLUCIÓN / EXPLORACIÓN FÍSICA / LABORATORIOS Y ESTUDIOS / PLAN / PRONÓSTICO. Nunca inventas datos clínicos."
     note = await llm_generate(system, user_prompt)
 
-    wa_prompt = f"""Con base en la siguiente información, redacta un MENSAJE BREVE Y PROFESIONAL para WhatsApp al médico tratante:
-
-INFORMACIÓN:
-{ctx}
-
-DÍA ({target}):
-- Dictado: {entry.get('dictation', '')}
-- Laboratorios: {entry.get('labs', '')}
-- Estudios: {entry.get('studies', '')}
-- Eventos: {entry.get('events', '')}
-
-Formato (texto plano, ≤10 líneas):
-
-Buenos días Dr(a). [Apellido].
-Reporte del paciente [Nombre], cama [Cama·Piso], DPQ [días].
-Dx: [dx resumido].
-QX: [procedimiento] ([fecha]).
-Evolución: [1-2 líneas]
-Labs: [lo relevante]
-Estudios: [si aplica]
-Plan: [lo que se hará hoy]
-Pendientes: [si hay]
-Saludos cordiales."""
-    system_wa = "Redactas mensajes clínicos breves, corteses y precisos para WhatsApp en español. Sin markdown, listos para copiar."
+    # WhatsApp — nuevo formato Etapa 3
+    wa_style = _style_block(training.get("whatsapp_examples", ""), "MENSAJES DE WHATSAPP AL TRATANTE")
+    dr_last = _extract_dr_lastname(patient.get("attending_physician"))
+    wa_prompt = (
+        f"REDACTA UN MENSAJE DE WHATSAPP PARA EL MÉDICO TRATANTE, ESTILO R3 DE CIRUGÍA GENERAL.\n\n"
+        f"DATOS DEL PACIENTE:\n{ctx}\n\n"
+        f"DATOS DEL DÍA ({target}):\n"
+        f"- DICTADO: {entry.get('dictation', '') or 'SIN DICTADO.'}\n"
+        f"- LABS: {entry.get('labs', '') or 'SIN LABS.'}\n"
+        f"- ESTUDIOS: {entry.get('studies', '') or 'NINGUNO.'}\n"
+        f"- PROCEDIMIENTOS: {entry.get('procedures', '') or 'NINGUNO.'}\n"
+        f"- CULTIVOS: {entry.get('cultures', '') or 'NINGUNO.'}\n"
+        f"- SIGNOS VITALES: {entry.get('vital_signs', '') or 'ND.'}\n"
+        f"- EVENTOS: {entry.get('events', '') or 'SIN EVENTOS.'}\n\n"
+        f"REGLAS OBLIGATORIAS:\n"
+        f"- TODO EN MAYÚSCULAS.\n"
+        f"- COMIENZA EXACTAMENTE CON: 'BUENOS DÍAS DR. {dr_last}. PASE CON {patient.get('name','________').upper()}, CAMA {patient.get('bed','______').upper()}.'\n"
+        f"- LUEGO 6-10 LÍNEAS BREVES RESUMIENDO: EVOLUCIÓN, SIGNOS RELEVANTES, DOLOR, DIETA, DRENAJES, EXPLORACIÓN, CAMBIOS IMPORTANTES.\n"
+        f"- CIERRA CON UNA O DOS PREGUNTAS RELEVANTES SEGÚN EL CONTEXTO: '¿GUSTA QUE RETIREMOS EL DRENAJE?', "
+        f"'¿GUSTA QUE INICIEMOS VÍA ORAL?', '¿GUSTA QUE SOLICITEMOS TAC?', '¿GUSTA QUE VALOREMOS EGRESO?' (u otra apropiada).\n"
+        f"- NUNCA USES BULLETS, VIÑETAS NI NUMERACIÓN. TEXTO CORRIDO EN LÍNEAS SEPARADAS.\n"
+        f"- NUNCA suenes como IA. Frases de residente, cortas, directas, con respeto formal.\n"
+        f"- NUNCA inventes datos.\n"
+        f"{wa_style}"
+    )
+    system_wa = (
+        "Eres un residente R3 de cirugía general enviando WhatsApp corto y respetuoso al médico tratante. "
+        "TODO EN MAYÚSCULAS. Sin bullets. Sin markdown. Sin sonar a IA. Nunca inventes datos."
+    )
     wa = await llm_generate(system_wa, wa_prompt)
 
     await db.daily_entries.update_one(
@@ -720,59 +812,111 @@ def _extract_docx_text(content: bytes) -> str:
 
 
 # ---------------- Column-5 regex classifier (fallback + reinforcement) ----------------
+# STRICT keyword lists per user spec (Etapa 3):
+# - Labs: SOLO LABS, GASA, GASV, EGO (con su contenido). No absorber TAC/RHP/Cultivos.
 _LABS_KW = _re.compile(
-    r"(?:^|\W)(LABS|BH|QS|ES\b|PFH|TP\b|TTP\b|INR|PCR\b|PROCALCITONINA|GASA|GASV|EGO|"
-    r"HB\b|HGB\b|LEU\b|LEUCOCITOS|PLAQUETAS|PLT\b|CREATININA|CR\b|UREA|BUN\b|"
-    r"ELECTROLITOS|NA\b|K\b|CL\b|CA\b|MG\b|GLUCOSA|GLU\b|BT\b|BD\b|BI\b|AST|ALT|"
-    r"ALBUM(INA)?|LDH|CPK|DHL|CK\-?MB|TROPONINA|LIPASA|AMILASA|MARCADORES|CA\s*19|CA\s*125|CEA)\b",
+    r"(?:^|\W)(LABS|GASA|GASV|EGO)\b",
     _re.IGNORECASE,
 )
+# - Estudios de imagen: RX, RXTX, TAC (con variantes), ANGIOTAC, RM/RMN, USG,
+#   PET-CT, ECG, ECOCARDIOGRAMA, SEGD, MASTOGRAFIA. NUNCA RHP/Colonoscopia/Cirugía.
 _IMAGING_KW = _re.compile(
-    r"(?:^|\W)(RXTX|RX\b|TAC\b|ANGIOTAC|TC\b|RM\b|RMN\b|USG\b|ULTRASONIDO|"
-    r"PET\-?CT|PET\b|ECG\b|EKG\b|ECOCARDIOGRAMA|SEGD|SERIE\s+ESOFAGOGA|"
-    r"MASTOGRAF|RADIOGRAF|TOMOGRAF|RESONANCIA)\b",
+    r"(?:^|\W)(RXTX|RX|TAC(?:\s+(?:ABD|TX|C\/C|IV|VO|SIMPLE|CONTRAST))?|ANGIOTAC|"
+    r"RM|RMN|USG|ULTRASONIDO|PET[\-\s]?CT|ECG|EKG|ECOCARDIOGRAMA|ECO|"
+    r"SEGD|SERIE\s+ESOFAGOGA|MASTOGRAF|RADIOGRAF|TOMOGRAF|RESONANCIA)\b",
     _re.IGNORECASE,
 )
+# - Procedimientos: Colonoscopia, Endoscopia, Panendoscopia, Cirugía, Hallazgos,
+#   Biopsias, RHP, Paracentesis, Drenajes, Toracocentesis. Y procedimientos QX con fecha.
 _PROC_KW = _re.compile(
-    r"(?:^|\W)(COLONOSCOPIA|ENDOSCOPIA|RHP\b|HALLAZGOS\s+QUIR|DRENAJES?|PARACENTESIS|"
-    r"TORACOCENTESIS|BIOPSIAS?|CIRUG(I|Í)A|QUIR[UÚ]RGIC|POST[\s\-]?OPERATORIO|POP\b|"
-    r"COLECISTECTOM|APENDICECTOM|LAPAROSCOP|LAPE\b|LAPAROTOM)\b",
+    r"(?:^|\W)(PANENDOSCOPIA|COLONOSCOPIA|ENDOSCOPIA|RHP|HALLAZGOS(?:\s+QUIR)?|"
+    r"DRENAJES?|PARACENTESIS|TORACOCENTESIS|BIOPSIAS?|CIRUG(?:I|Í)A|QUIR[UÚ]RGIC|"
+    r"HEMICOLECTOM(?:I|Í)A|COLECISTECTOM(?:I|Í)A|APENDICECTOM(?:I|Í)A|"
+    r"LAPAROSCOP|LAPE|LAPAROTOM|ITALLMR|ILEOSTOM|COLOSTOM|GASTROSTOM|"
+    r"YEYUNOSTOM|ANASTOMOSIS|RESECC[IÓ]N|ANEXECTOM|HISTERECTOM|OOFERECTOM|"
+    r"MASTECTOM|ADENECTOM|SPLENECTOM|POST[\s\-]?OPERATORIO|POP\b|PO\s+LAPE)\b",
     _re.IGNORECASE,
 )
+# - Cultivos: Cultivos, Hemocultivos, Urocultivos, Gram, Susceptibilidad, BLEE,
+#   Microorganismos, Antibiograma, Desarrollo, Aislamiento.
 _CULT_KW = _re.compile(
-    r"(?:^|\W)(HEMOCULTIVOS?|UROCULTIVOS?|CULTIVOS?|GRAM\b|SUSCEPTIBILIDAD|DESARROLLO|"
-    r"BLEE\b|MICROORGANISMOS?|AISLAMIENTO|ANTIBIOGRAMA)\b",
+    r"(?:^|\W)(HEMOCULTIVOS?|UROCULTIVOS?|CULTIVOS?|GRAM|SUSCEPTIBILIDAD|"
+    r"DESARROLLO|BLEE|MICROORGANISMOS?|AISLAMIENTO|ANTIBIOGRAMA)\b",
+    _re.IGNORECASE,
+)
+
+# Clasificaciones / escalas (van al final del dx_full como CLASIFICACIONES:)
+# NO son diagnósticos ni procedimientos.
+_CLASSIFICATION_KW = _re.compile(
+    r"\b("
+    r"PADUA\s*\d+|"
+    r"ROCKALL\s*\d+|"
+    r"ECOG\s*[0-4]|"
+    r"KARNOFSKY\s*\d+|"
+    r"CHILD[\s\-]?PUGH\s*[A-C]|"
+    r"MELD\s*\d+|"
+    r"APACHE\s*(?:II|III|IV)?\s*\d*|"
+    r"SOFA\s*\d+|"
+    r"GLASGOW\s*\d+|GCS\s*\d+|"
+    r"NIHSS\s*\d+|"
+    r"EC\s*[IV]+[A-C]?|"                    # Estadio clínico romano
+    r"ESTADIO\s*[IV]+[A-C]?|"
+    r"T[0-4]N[0-3]M[0-1X]|"                  # TNM
+    r"TNM\s*T[0-4]N[0-3]M[0-1X]|"
+    r"BCLC\s*[0-D]|"
+    r"OKUDA\s*[I-V]+|"
+    r"BREUSH|"
+    r"BAKER\s*[I-V]+|"
+    r"AAST\s*[I-V]+|"
+    r"HINCHEY\s*[I-V]+[a-c]?|"
+    r"MRC\s*[0-5]|"
+    r"MRC\s*DYSPNEA|"
+    r"WELLS\s*[\d\.]+|"
+    r"GENEVA\s*[\d\.]+|"
+    r"CHA2DS2[\s\-]?VASC\s*\d+|"
+    r"HAS[\s\-]?BLED\s*\d+"
+    r")\b",
     _re.IGNORECASE,
 )
 
 
 def _classify_col5_text(text: str) -> dict:
-    """Split a big text block (usually column 5) into labs/studies/procedures/cultures.
-    Strategy: split by KEYWORD BOUNDARIES so each keyword starts its own chunk.
-    This prevents a single labs keyword from absorbing subsequent imaging/procedure/culture content.
+    """Split col 5 text into labs/studies/procedures/cultures.
+    STRICT rules per user spec (Etapa 3):
+    - labs: SOLO chunks que empiezan con LABS/GASA/GASV/EGO
+    - studies: SOLO chunks que empiezan con RX/RXTX/TAC/ANGIOTAC/RM/RMN/USG/PET/ECG/ECO/SEGD/MASTOGRAF/etc.
+    - procedures: SOLO chunks que empiezan con COLONOSCOPIA/ENDOSCOPIA/PANENDOSCOPIA/CIRUGIA/RHP/HALLAZGOS/BIOPSIAS/PARACENTESIS/DRENAJES/etc.
+    - cultures: SOLO chunks que empiezan con CULTIVOS/HEMOCULTIVOS/UROCULTIVOS/GRAM/BLEE/etc.
+    - Un chunk termina cuando comienza otro keyword de OTRA categoría.
     """
     if not text or not text.strip():
         return {"labs": "", "studies": "", "procedures": "", "cultures": "", "events": ""}
     raw = text.strip()
 
-    # Keyword-anchored splitter: chunk boundary starts BEFORE any of these keywords.
+    # Anchor: chunk boundary starts BEFORE any category keyword OR a date.
+    # Ordering matters: more specific first so ANGIOTAC beats TAC etc.
     _SPLIT_ANCHOR = _re.compile(
-        r"(?=(?:^|\n|\s{2,}|(?<=[\s\.\;]))"
-        r"(?:LABS|GASA|GASV|EGO|BH|QS|PFH|"
-        r"TAC(?:\s+(?:ABD|TX|C\/C|IV|VO))?|ANGIOTAC|RXTX|RX\b|RMN?\b|USG|"
-        r"PET[\-\s]?CT|ECG\b|ECOCARDIOGRAMA|ECO\b|SEGD|MASTOGRAF|"
-        r"COLONOSCOPIA|ENDOSCOPIA|RHP\b|CIRUG[IÍ]A|HALLAZGOS|PARACENTESIS|"
-        r"TORACOCENTESIS|BIOPSIAS?|DRENAJES?|"
-        r"HEMOCULTIVOS?|UROCULTIVOS?|CULTIVOS?|GRAM\b|BLEE\b|"
-        r"SUSCEPTIBILIDAD|DESARROLLO|MICROORGANISMOS?|ANTIBIOGRAMA)\b)",
+        r"(?=(?:^|\n|\.\s+|;\s*)"
+        r"(?:LABS|GASA|GASV|EGO|"
+        r"ANGIOTAC|TAC(?:\s+(?:ABD|TX|C\/C|IV|VO|SIMPLE|CONTRAST))?|"
+        r"RXTX|RX|RMN|RM|USG|ULTRASONIDO|"
+        r"PET[\-\s]?CT|ECG|EKG|ECOCARDIOGRAMA|ECO|"
+        r"SEGD|MASTOGRAF|RADIOGRAF|TOMOGRAF|RESONANCIA|"
+        r"PANENDOSCOPIA|COLONOSCOPIA|ENDOSCOPIA|RHP|HALLAZGOS|"
+        r"CIRUG(?:I|Í)A|QUIR[UÚ]RGIC|PO\s+LAPE|LAPE|LAPAROSCOP|LAPAROTOM|"
+        r"HEMICOLECTOM|COLECISTECTOM|APENDICECTOM|ITALLMR|ILEOSTOM|COLOSTOM|"
+        r"PARACENTESIS|TORACOCENTESIS|BIOPSIAS?|DRENAJES?|"
+        r"HEMOCULTIVOS?|UROCULTIVOS?|CULTIVOS?|GRAM|BLEE|"
+        r"SUSCEPTIBILIDAD|DESARROLLO|MICROORGANISMOS?|ANTIBIOGRAMA|AISLAMIENTO)"
+        r"\b)",
         _re.IGNORECASE,
     )
-    # Also split by dates on their own line (fecha subrayada)
-    _DATE_SPLIT = _re.compile(r"(?=\b\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b)")
+    # Also split before standalone dates (a "fecha subrayada" starts a new item)
+    _DATE_SPLIT = _re.compile(r"(?=\n\s*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b)")
 
     # First split by keyword anchors
     chunks = _SPLIT_ANCHOR.split(raw)
-    # Then, refine: split each chunk by date boundaries if it has multiple dates
+    # Then refine by dates
     refined: list[str] = []
     for ch in chunks:
         ch = ch.strip()
@@ -789,26 +933,29 @@ def _classify_col5_text(text: str) -> dict:
 
     bins = {"labs": [], "studies": [], "procedures": [], "cultures": [], "events": []}
 
-    # Classify each chunk by its FIRST keyword match (most specific first)
+    def _classify_chunk(chunk: str) -> str:
+        """Return the category based on the FIRST keyword found (leading token wins)."""
+        # Strip any leading date to look at the actual keyword
+        head = _re.sub(r"^\s*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\s*[\n\-]?\s*", "", chunk, count=1)
+        head_upper = head.upper().lstrip()
+
+        # Check cultures first (very specific)
+        if _re.match(r"(?:HEMOCULTIVOS?|UROCULTIVOS?|CULTIVOS?|GRAM|BLEE|SUSCEPTIBILIDAD|DESARROLLO|MICROORGANISMOS?|ANTIBIOGRAMA|AISLAMIENTO)\b", head_upper):
+            return "cultures"
+        # Procedures next
+        if _re.match(r"(?:PANENDOSCOPIA|COLONOSCOPIA|ENDOSCOPIA|RHP|HALLAZGOS|CIRUG|QUIR|PO\s+LAPE|LAPE|LAPAROSCOP|LAPAROTOM|HEMICOLECTOM|COLECISTECTOM|APENDICECTOM|ITALLMR|ILEOSTOM|COLOSTOM|PARACENTESIS|TORACOCENTESIS|BIOPSIAS?|DRENAJES?)\b", head_upper):
+            return "procedures"
+        # Imaging studies
+        if _re.match(r"(?:ANGIOTAC|TAC|RXTX|RX|RMN|RM|USG|ULTRASONIDO|PET|ECG|EKG|ECOCARDIOGRAMA|ECO|SEGD|MASTOGRAF|RADIOGRAF|TOMOGRAF|RESONANCIA)\b", head_upper):
+            return "studies"
+        # Labs
+        if _re.match(r"(?:LABS|GASA|GASV|EGO)\b", head_upper):
+            return "labs"
+        return "events"
+
     for chunk in refined:
-        scores = {
-            "cultures": len(_CULT_KW.findall(chunk)),
-            "studies": len(_IMAGING_KW.findall(chunk)),
-            "procedures": len(_PROC_KW.findall(chunk)),
-            "labs": len(_LABS_KW.findall(chunk)),
-        }
-        # Priority when tied: cultures > studies > procedures > labs (specificity)
-        priority = ["cultures", "studies", "procedures", "labs"]
-        best = None
-        best_score = 0
-        for cat in priority:
-            if scores[cat] > best_score:
-                best = cat
-                best_score = scores[cat]
-        if best_score == 0:
-            bins["events"].append(chunk)
-        else:
-            bins[best].append(chunk)
+        cat = _classify_chunk(chunk)
+        bins[cat].append(chunk)
 
     return {k: "\n\n".join(v) for k, v in bins.items()}
 
@@ -898,9 +1045,13 @@ def _parse_row_deterministic(cells: list[str]) -> Optional[dict]:
             try: p["age"] = int(m.group(1))
             except Exception: pass
 
-    # ---- COL 3 (idx 2): DIAGNÓSTICOS ONLY ----
-    # Defensive: strip lines that look like drug orders (dose, route, freq), imaging keywords,
-    # labs, procedures, cultures — those don't belong here.
+    # ---- COL 3 (idx 2): DIAGNÓSTICOS + separación de PROCEDIMIENTOS y CLASIFICACIONES ----
+    # Reglas Etapa 3:
+    #  - Diagnósticos reales quedan en dx_short/dx_full.
+    #  - Procedimientos con fecha (12/06/26 PANENDOSCOPIA, PO LAPE + HEMICOLECTOMIA, etc.)
+    #    se extraen y se mueven a daily_entry.procedures.
+    #  - Clasificaciones (PADUA 7, ECOG 1, T4N3M1, ROCKALL 6, EC IVA...) se agregan al
+    #    final del dx_full bajo el subtítulo "CLASIFICACIONES:", pero NO en dx_short.
     _DRUG_RE = _re.compile(
         r"(?:\d+\s*(?:mg|g|mcg|mcgs|ml|ml/h|ml/hr|UI|meq|gtas?|comp|caps|cc)\b"
         r"|c/\d+\s*h\b"
@@ -908,23 +1059,107 @@ def _parse_row_deterministic(cells: list[str]) -> Optional[dict]:
         r"|\b(?:PRN|c/8|c/12|c/24|c/6)\b)",
         _re.IGNORECASE,
     )
+    _DATE_LINE_RE = _re.compile(r"^\s*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\s*$")
+    _PROC_IN_DX_RE = _re.compile(
+        r"^\s*(?:\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\s+)?"
+        r"(?:PANENDOSCOPIA|COLONOSCOPIA|ENDOSCOPIA|RHP|PO\s+LAPE|LAPE|"
+        r"HEMICOLECTOM|COLECISTECTOM|APENDICECTOM|ITALLMR|LAPAROSCOP|LAPAROTOM|"
+        r"HALLAZGOS|PARACENTESIS|TORACOCENTESIS|BIOPSIAS?|DRENAJES?|"
+        r"ILEOSTOM|COLOSTOM|GASTROSTOM|YEYUNOSTOM|ANASTOMOSIS|RESECC[IÓ]N|"
+        r"ANEXECTOM|HISTERECTOM|OOFERECTOM|MASTECTOM|SPLENECTOM)",
+        _re.IGNORECASE,
+    )
+
     dx_cell = cells[2].strip()
+    dx_lines_raw = [ln.strip() for ln in dx_cell.split("\n") if ln.strip()]
+
     dx_clean: list[str] = []
-    for line in dx_cell.split("\n"):
-        s = line.strip()
-        if not s:
+    proc_lines: list[str] = []
+    class_lines: list[str] = []
+    pending_date: Optional[str] = None  # a date line waits for its next content line
+
+    for line in dx_lines_raw:
+        # Pure date line — retain for the next content line
+        if _DATE_LINE_RE.match(line):
+            pending_date = line
             continue
-        if _cell_classification_score(s) > 0:
-            continue  # skip: imaging/labs/proc/culture accidental
-        if _DRUG_RE.search(s):
-            continue  # skip: it's actually an indication that leaked in
-        # Skip lines that are ONLY numbers or ONLY DEIH/DPQX
-        if _re.fullmatch(r"\s*(DEIH|DPQX)?\s*\d*\s*", s, _re.IGNORECASE):
+
+        # Skip pure DEIH/DPQX/number-only
+        if _re.fullmatch(r"\s*(DEIH|DPQX)?\s*\d*\s*", line, _re.IGNORECASE):
+            pending_date = None
             continue
-        dx_clean.append(s)
+
+        # Classification-only line: capture and skip
+        if _CLASSIFICATION_KW.search(line) and not _PROC_IN_DX_RE.match(line):
+            # If the line is ONLY classifications, redirect entirely
+            # e.g. "PADUA 7", "ECOG 1", "T4N3M1", "EC IVA"
+            stripped = line.strip()
+            # If the line has some other diagnosis words + a classification,
+            # we still keep the whole line as dx (it's a diagnosis WITH a classification).
+            # Heuristic: if line length is short (<= 25 chars) and matches only classification pattern, treat as pure classification.
+            only_class = _re.fullmatch(
+                r"\s*(?:PADUA\s*\d+|ROCKALL\s*\d+|ECOG\s*[0-4]|KARNOFSKY\s*\d+|"
+                r"CHILD[\s\-]?PUGH\s*[A-C]|MELD\s*\d+|APACHE\s*(?:II|III|IV)?\s*\d*|"
+                r"SOFA\s*\d+|GLASGOW\s*\d+|GCS\s*\d+|NIHSS\s*\d+|"
+                r"EC\s*[IV]+[A-C]?|ESTADIO\s*[IV]+[A-C]?|"
+                r"T[0-4]N[0-3]M[0-1X]|TNM\s*T[0-4]N[0-3]M[0-1X]|"
+                r"BCLC\s*[0-D]|OKUDA\s*[I-V]+|BAKER\s*[I-V]+|AAST\s*[I-V]+|"
+                r"HINCHEY\s*[I-V]+[a-c]?|MRC\s*[0-5]|WELLS\s*[\d\.]+|"
+                r"GENEVA\s*[\d\.]+|CHA2DS2[\s\-]?VASC\s*\d+|HAS[\s\-]?BLED\s*\d+)\s*",
+                stripped,
+                _re.IGNORECASE,
+            )
+            if only_class:
+                class_lines.append(stripped.upper())
+                pending_date = None
+                continue
+            # otherwise fall-through to normal dx handling but capture also the classification
+            found = _CLASSIFICATION_KW.findall(stripped)
+            for f in found:
+                if f.upper() not in class_lines:
+                    class_lines.append(f.upper())
+            # Continue processing the line (it may still contain a real dx)
+
+        # Procedure line (with or without date prefix) → daily_entry.procedures
+        if _PROC_IN_DX_RE.match(line):
+            proc_text = line
+            if pending_date:
+                proc_text = f"{pending_date} {line}"
+                pending_date = None
+            proc_lines.append(proc_text)
+            continue
+
+        # Imaging / labs / cultures accidentally in dx column → skip (belongs to col5)
+        if _cell_classification_score(line) > 0:
+            pending_date = None
+            continue
+
+        # Drug/indication that leaked in → skip
+        if _DRUG_RE.search(line):
+            pending_date = None
+            continue
+
+        # Real diagnosis line
+        dx_line = line
+        if pending_date:
+            # A date preceding a diagnosis is unusual, but keep it attached
+            dx_line = f"{pending_date} {line}"
+            pending_date = None
+        dx_clean.append(dx_line)
+
     if dx_clean:
         p["dx_short"] = dx_clean[0][:200]
-        p["dx_full"] = "\n".join(dx_clean)[:2000]
+        dx_full_text = "\n".join(dx_clean)
+        if class_lines:
+            dx_full_text += "\n\nCLASIFICACIONES:\n" + "\n".join(class_lines)
+        p["dx_full"] = dx_full_text[:2500]
+    elif class_lines:
+        # Only classifications, no explicit dx → store classifications in dx_full for reference
+        p["dx_full"] = "CLASIFICACIONES:\n" + "\n".join(class_lines)
+
+    if proc_lines:
+        # Stash for daily_entry.procedures downstream merge
+        p["_col3_procedures"] = "\n".join(proc_lines)
 
     # ---- COL 4 (idx 3): INDICACIONES → important_medications (NEVER dx) ----
     ind_text = cells[3].strip()
@@ -939,10 +1174,19 @@ def _parse_row_deterministic(cells: list[str]) -> Optional[dict]:
         buckets = _classify_col5_text(col4)
         p["labs"] = buckets["labs"]
         p["studies"] = buckets["studies"]
-        p["procedures"] = buckets["procedures"]
+        # Merge procedures from Col3 (dates+QX lines) with Col5 procedures
+        col5_procs = buckets["procedures"]
+        col3_procs = p.pop("_col3_procedures", "")
+        merged_procs = "\n\n".join(x for x in (col3_procs, col5_procs) if x)
+        p["procedures"] = merged_procs
         p["cultures"] = buckets["cultures"]
         if buckets["events"]:
             p["events"] = buckets["events"]
+    else:
+        # Even if Col5 empty, still surface Col3-extracted procedures
+        col3_procs = p.pop("_col3_procedures", "")
+        if col3_procs:
+            p["procedures"] = col3_procs
 
     # ---- COL 6 (idx 5): signos vitales ----
     col5 = cells[5].strip()
@@ -1418,85 +1662,87 @@ Reglas estrictas:
     system_pase = "Eres un asistente experto para un residente de cirugía general. Redactas pases para pacientes ESTABLES sin eventualidades, reutilizando el contexto previo. Nunca inventas eventos ni complicaciones."
     pase_text = await llm_generate(system_pase, pase_prompt)
 
-    # 2) NOTA MEDSYS
-    note_prompt = f"""Genera la NOTA DE EVOLUCIÓN correspondiente a este paciente ESTABLE (sin eventualidades en las últimas 24 h). Formato MedSys exacto:
+    # 2) NOTA MEDSYS — nuevo formato Etapa 3 (mayúsculas, sin listas, plantilla Piso/UTI)
+    is_uti = _is_uti_patient(patient)
+    training = await _get_training_examples(user["id"])
+    style_examples = training.get("uti_notes_examples" if is_uti else "hospital_notes_examples", "")
+    style_block = _style_block(style_examples, "NOTAS DE UTI/UTIM" if is_uti else "NOTAS DE HOSPITALIZACIÓN")
+    plantilla = "UTI/UTIM" if is_uti else "PISO"
 
-INFORMACIÓN FIJA:
-{ctx}
+    if is_uti:
+        skeleton = (
+            "NOTA DE EVOLUCIÓN EN UTI/UTIM — CIRUGÍA GENERAL — {DATE}\n\n"
+            "SUBJETIVO: (PACIENTE SIN EVENTUALIDADES EN LAS ÚLTIMAS 24 HORAS, CONTINÚA CON MANEJO ESTABLECIDO. NARRATIVA CORRIDA.)\n\n"
+            "NEUROLÓGICO: (RASS Y GLASGOW O ESTADO REFERIDO.)\n"
+            "CARDIOVASCULAR: (ESTABLE HEMODINÁMICAMENTE, SIN AMINAS SI APLICA.)\n"
+            "RESPIRATORIO: (SEGÚN MODO VENTILATORIO O AIRE AMBIENTE.)\n"
+            "GASTROINTESTINAL / QUIRÚRGICO: (ABDOMEN, HERIDA, DRENAJES ESTABLES.)\n"
+            "RENAL: (URESIS ADECUADA, BALANCE, ELECTROLITOS.)\n"
+            "INFECCIOSO: (SIN DATOS DE INFECCIÓN AGREGADA, ANTIBIÓTICOS EN CURSO SI APLICA.)\n"
+            "HEMATOLÓGICO / METABÓLICO: (SIN CAMBIOS RELEVANTES.)\n\n"
+            "EXPLORACIÓN FÍSICA: (PÁRRAFO CORRIDO. INCLUIR SIGNOS, ESTADO GENERAL, ABDOMEN, HERIDA, DRENAJES.)\n\n"
+            "LABORATORIOS Y ESTUDIOS DEL DÍA: (NARRATIVA CON LOS VALORES DE HOY Y TENDENCIAS.)\n\n"
+            "PLAN: (PÁRRAFO CORRIDO. CONTINUAR MISMO PLAN, VIGILANCIA CLÍNICA, MANTENER ESQUEMA.)\n\n"
+            "PRONÓSTICO: (UNA SOLA LÍNEA ACORDE A ESTABILIDAD.)\n"
+        ).replace("{DATE}", target)
+    else:
+        skeleton = (
+            "NOTA DE EVOLUCIÓN — CIRUGÍA GENERAL — {DATE}\n\n"
+            "PACIENTE: (NOMBRE, EDAD, SEXO). CAMA (CAMA). TRATANTE: (APELLIDO). "
+            "DEIH (X) DÍAS. DPQX (X) DÍAS.\n"
+            "DX: (DIAGNÓSTICO RESUMIDO).\n"
+            "QX: (PROCEDIMIENTO Y FECHA, SI APLICA).\n\n"
+            "SUBJETIVO Y EVOLUCIÓN: (PÁRRAFO CORRIDO ESTILO R3. PACIENTE SIN EVENTUALIDADES EN LAS ÚLTIMAS 24 HORAS, "
+            "CONTINÚA ESTABLE, TOLERANDO DIETA, DOLOR CONTROLADO, HERIDA SIN DATOS DE INFECCIÓN. ADAPTAR SEGÚN CONTEXTO.)\n\n"
+            "EXPLORACIÓN FÍSICA: (PÁRRAFO CORRIDO EN MAYÚSCULAS. INCLUIR SIGNOS VITALES SI HAY, ESTADO GENERAL, "
+            "CABEZA Y CUELLO, CARDIOPULMONAR, ABDOMEN CON HERIDA Y DRENAJES, EXTREMIDADES, NEUROLÓGICO. SIN LISTAS.)\n\n"
+            "LABORATORIOS Y ESTUDIOS: (NARRAR VALORES DEL DÍA Y CAMBIOS RELEVANTES VS PREVIO. SI NO HAY, DECIR 'SIN NUEVOS LABORATORIOS EL DÍA DE HOY'.)\n\n"
+            "PLAN: (PÁRRAFO CORRIDO. CONTINUAR MISMO ESQUEMA TERAPÉUTICO, DIETA, ANALGESIA, PROFILAXIS, "
+            "MOVILIZACIÓN, VIGILANCIA CLÍNICA. NUNCA USAR NUMERACIÓN NI VIÑETAS.)\n\n"
+            "PRONÓSTICO: (UNA SOLA LÍNEA.)\n"
+        ).replace("{DATE}", target)
 
-RESUMEN DEL PASE DE HOY (recién generado):
-{pase_text}
-
-LABS DE HOY: {today_entry.get('labs', '') or 'Sin nuevos laboratorios.'}
-ESTUDIOS DE HOY: {today_entry.get('studies', '') or 'Ninguno.'}
-
-Formato exacto (texto plano):
-
-NOTA DE EVOLUCIÓN — {target}
-Servicio: Cirugía General
-
-ENCABEZADO
-Paciente: (nombre completo, edad, sexo)
-Cama / Piso: (cama · piso)
-Días de estancia: (DEIH) | Días postoperatorios: (DPQX)
-Diagnóstico: (dx resumido)
-Cirugía: (fecha · procedimiento)
-Antecedentes relevantes: (una línea o "Sin antecedentes de relevancia")
-Interconsultas activas: (lista o "Ninguna")
-
-EVOLUCIÓN
-Paciente que se encuentra sin eventualidades durante las últimas 24 horas. (Adapta al contexto: postquirúrgico, oncológico, etc.) Continúa con manejo establecido, sin complicaciones referidas. (2-3 párrafos breves reflejando estabilidad clínica.)
-
-EXPLORACIÓN FÍSICA
-Signos vitales: ND
-Estado general: estable, sin datos de descompensación referidos
-Cabeza y cuello: sin alteraciones referidas
-Cardiopulmonar: sin datos referidos
-Abdomen: sin cambios respecto a lo previo (herida, drenajes si aplica)
-Extremidades: sin datos referidos
-Neurológico: sin datos referidos
-
-LABORATORIOS Y ESTUDIOS
-Laboratorios del día: (valores si hay; si no, "Sin nuevos laboratorios el día de hoy")
-Cambios relevantes: (tendencias si hay comparación; si no, "N/A")
-Estudios / procedimientos: (si hay; si no, "Sin estudios el día de hoy")
-
-PLAN
-1. Continuar mismo plan terapéutico.
-2. (dieta / analgesia / profilaxis según info fija disponible)
-3. Vigilancia clínica.
-4. (interconsultas y pendientes si aplican)
-
-PRONÓSTICO
-(Una línea acorde a estabilidad clínica.)
-
-—
-Firma: Residente de Cirugía General
-
-Reglas: no inventes datos, refleja estabilidad; español médico profesional; sin markdown."""
-    system_note = "Redactas notas MedSys para pacientes estables sin cambios. No inventas datos. Reflejas estabilidad. Español médico."
+    note_prompt = (
+        f"INFORMACIÓN FIJA DEL PACIENTE:\n{ctx}\n\n"
+        f"RESUMEN DEL PASE DE HOY (RECIÉN GENERADO):\n{pase_text}\n\n"
+        f"LABORATORIOS DE HOY: {today_entry.get('labs', '') or 'SIN NUEVOS LABORATORIOS.'}\n"
+        f"ESTUDIOS DE HOY: {today_entry.get('studies', '') or 'NINGUNO.'}\n"
+        f"PROCEDIMIENTOS: {today_entry.get('procedures', '') or 'NINGUNO.'}\n"
+        f"CULTIVOS: {today_entry.get('cultures', '') or 'NINGUNO.'}\n"
+        f"SIGNOS VITALES: {today_entry.get('vital_signs', '') or 'ND.'}\n\n"
+        f"CONTEXTO: PACIENTE ESTABLE, SIN EVENTUALIDADES EN 24 HORAS.\n"
+        f"PLANTILLA A USAR: {plantilla}\n\n"
+        f"REDACTA LA NOTA SIGUIENDO EXACTAMENTE ESTA ESTRUCTURA (RELLENA CADA SECCIÓN, MAYÚSCULAS, SIN LISTAS):\n\n{skeleton}\n"
+        f"{style_block}"
+    )
+    system_note = (
+        "Eres RESIDENTE R3 DE CIRUGÍA GENERAL redactando una nota MedSys para un paciente estable sin cambios. "
+        "TODO EN MAYÚSCULAS. Sin listas. Sin viñetas. Sin numeración. Todo en párrafos corridos. "
+        "Sin markdown. Nunca inventes datos. Nunca suenes como IA. Refleja estabilidad clínica."
+    )
     note_text = await llm_generate(system_note, note_prompt)
 
-    # 3) WHATSAPP
-    wa_prompt = f"""Redacta un MENSAJE BREVE para el médico tratante (WhatsApp) informando que el paciente continúa estable.
-
-INFORMACIÓN:
-{ctx}
-
-Contexto: paciente ESTABLE, sin eventualidades en 24 h. {'Nuevos labs disponibles.' if today_entry.get('labs') else ''}
-
-Formato texto plano (≤10 líneas, listo para copiar):
-
-Buenos días Dr(a). [Apellido].
-Reporte del paciente [Nombre], cama [Cama·Piso], DPQX [días].
-Dx: [dx resumido].
-QX: [procedimiento] ([fecha]).
-Evolución: Paciente sin eventualidades en las últimas 24 horas, continúa estable con manejo establecido.
-Labs: {today_entry.get('labs', '') or 'Sin nuevos laboratorios el día de hoy.'}
-Plan: Continuar mismo esquema y vigilancia clínica.
-Pendientes: [si aplican, si no "Sin pendientes activos"]
-Saludos cordiales."""
-    system_wa = "Redactas mensajes breves y corteses para WhatsApp en español médico. Sin markdown."
+    # 3) WHATSAPP — nuevo formato Etapa 3
+    wa_style = _style_block(training.get("whatsapp_examples", ""), "MENSAJES DE WHATSAPP AL TRATANTE")
+    dr_last = _extract_dr_lastname(patient.get("attending_physician"))
+    wa_prompt = (
+        f"REDACTA UN WHATSAPP CORTO ESTILO R3 PARA EL MÉDICO TRATANTE (PACIENTE ESTABLE, SIN CAMBIOS).\n\n"
+        f"DATOS:\n{ctx}\n\n"
+        f"LABS DE HOY: {today_entry.get('labs', '') or 'SIN NUEVOS LABS.'}\n"
+        f"ESTUDIOS: {today_entry.get('studies', '') or 'NINGUNO.'}\n\n"
+        f"REGLAS OBLIGATORIAS:\n"
+        f"- TODO EN MAYÚSCULAS.\n"
+        f"- COMIENZA EXACTAMENTE CON: 'BUENOS DÍAS DR. {dr_last}. PASE CON {patient.get('name','________').upper()}, CAMA {patient.get('bed','______').upper()}.'\n"
+        f"- 5-8 LÍNEAS RESUMIENDO: EVOLUCIÓN (SIN EVENTUALIDADES EN 24H), DOLOR CONTROLADO, DIETA, DRENAJES, EXPLORACIÓN GENERAL, PLAN.\n"
+        f"- CIERRA CON UNA PREGUNTA APROPIADA AL CONTEXTO: '¿GUSTA QUE CONTINUEMOS MISMO ESQUEMA?', '¿GUSTA QUE VALOREMOS EGRESO?', '¿GUSTA QUE INICIEMOS VÍA ORAL?' O SIMILAR.\n"
+        f"- NUNCA BULLETS, VIÑETAS NI NUMERACIÓN.\n"
+        f"- NUNCA suenes como IA ni inventes datos.\n"
+        f"{wa_style}"
+    )
+    system_wa = (
+        "Eres residente R3 de cirugía general enviando WhatsApp respetuoso y directo al médico tratante. "
+        "TODO EN MAYÚSCULAS. Sin bullets. Sin markdown. Sin sonar a IA. Nunca inventes datos."
+    )
     wa_text = await llm_generate(system_wa, wa_prompt)
 
     # Save all

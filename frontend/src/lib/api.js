@@ -69,6 +69,9 @@ export const api = {
       timeout: 120000,
     }).then((r) => r.data);
   },
+
+  getTrainingExamples: () => client.get("/training-examples").then((r) => r.data),
+  saveTrainingExamples: (body) => client.put("/training-examples", body).then((r) => r.data),
 };
 
 export default client;

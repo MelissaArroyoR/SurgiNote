@@ -9,6 +9,7 @@ import PatientDetail from "@/pages/PatientDetail";
 import Pase from "@/pages/Pase";
 import Notas from "@/pages/Notas";
 import Ingresos from "@/pages/Ingresos";
+import Configuracion from "@/pages/Configuracion";
 
 function Protected({ children }) {
   const { user, ready } = useAuth();
@@ -42,6 +43,7 @@ function App() {
             <Route path="pase" element={<Pase />} />
             <Route path="notas" element={<Notas />} />
             <Route path="ingresos" element={<Ingresos />} />
+            <Route path="configuracion" element={<Configuracion />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

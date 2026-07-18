@@ -1,0 +1,58 @@
+{
+  "summary": "Etapa 3 validado end-to-end. 12/12 backend tests PASSED en /app/backend/tests/test_etapa3.py (parser censo, training-examples GET/PUT, generate/note Piso, generate/note UTI, generate/no-changes, regresiones). Frontend: tab 'Config' visible en bottom nav de 5 columnas, navega a /configuracion, muestra 3 textareas correctos, guarda vía PUT /training-examples (200), toast 'Ejemplos guardados' aparece, y los valores persisten tras reload. Encontré 1 bug backend: POST /api/patients devuelve 500 cuando el body no envía is_surgical/is_pending_discharge (PatientCreate acepta Optional[bool]=None pero Patient los declara como bool obligatorio → ValidationError).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/patients",
+        "issue": "Devuelve 500 (pydantic ValidationError: 'is_surgical/is_pending_discharge Input should be a valid boolean, input_value=None') si el body no incluye is_surgical/is_pending_discharge. PatientCreate los define Optional[bool]=None y luego Patient(**body.model_dump()) falla porque Patient exige bool. Bloqueaba mis fixtures hasta que agregué esos campos. La UI probablemente esté a salvo porque envía valores explícitos, pero cualquier integración/pytest sin esos campos crashea. Fix: en create_patient hacer `data = {k:v for k,v in body.model_dump().items() if v is not None}` antes de pasarlo a Patient(**data), o hacer los campos Optional[bool]=True/False en PatientCreate.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "verified_fixes": [
+    "Parser Col5 estricto: labs contiene 'LABS', NUNCA TAC/COLONOSCOPIA/HEMOCULTIVO. Studies contiene TAC pero no COLONOSCOPIA. Procedures contiene PANENDOSCOPIA + HEMICOLECTOM (Col3) + COLONOSCOPIA (Col5). Cultures contiene HEMOCULTIVO.",
+    "Parser Col3: dx_short = 'CARCINOMA...' (no PANENDOSCOPIA/LAPE). dx_full termina con 'CLASIFICACIONES:' seguido de PADUA 7 / ECOG 1 / T4N3M1.",
+    "important_medications de Col4 contiene OMEPRAZOL.",
+    "generate/note (Piso): retorna note+whatsapp; nota en MAYÚSCULAS (ratio ≥ 0.85), sin bullets '- ' ni numeración '1.'. WhatsApp inicia con 'BUENOS DÍAS DR.' y contiene 'PASE CON' y 'CAMA'.",
+    "generate/note (UTI): nota contiene secciones NEUROLÓGICO/CARDIOVASCULAR/RESPIRATORIO/RENAL/INFECCIOSO, en mayúsculas.",
+    "generate/no-changes: nota en mayúsculas sin bullets, WhatsApp con encabezado 'BUENOS DÍAS DR.'.",
+    "training-examples GET default = strings vacíos. PUT persiste los 3 campos, GET los devuelve idénticos.",
+    "Frontend: bottom nav grid-cols-5 con tabs [Pacientes, Pase, Notas, Ingresos, Config]. /configuracion muestra 3 textareas con data-testid hospital-notes-textarea / uti-notes-textarea / whatsapp-examples-textarea. Botón save-training-btn hace PUT 200 y muestra toast. Recarga preserva contenido.",
+    "Regresión: /auth/me, GET /patients, GET /patients/{id} funcionan.",
+    "Test unitario /app/tests/test_parser_etapa3.py sigue pasando (assertions completas del parser)."
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_etapa3.py",
+    "/app/tests/test_parser_etapa3.py",
+    "/app/test_reports/pytest/pytest_etapa3.xml"
+  ],
+  "action_items": [
+    "HIGH: Arreglar POST /api/patients para tolerar body sin is_surgical/is_pending_discharge. Sugerencia: en create_patient hacer `payload = {k:v for k,v in body.model_dump().items() if v is not None}` antes de `Patient(user_id=user['id'], **payload)`.",
+    "MEDIA/OPCIONAL: EMERGENT_LLM_KEY funcionó correctamente hoy (llamadas a GPT-5.2 exitosas en generate/note y no-changes). El presupuesto reportado como agotado en iteration_2 ya no bloquea."
+  ],
+  "critical_code_review_comments": [
+    "server.py sigue creciendo (2133 líneas); considerar splitting en módulos (auth, patients, censo_parser, generation).",
+    "PatientCreate y Patient tienen defaults inconsistentes para is_surgical/is_pending_discharge (Optional[None] vs bool), causando bug de create.",
+    "IMPORT_JOBS en memoria (dict sin TTL) — sigue igual que iteración 2.",
+    "generate/no-changes prompt aún incluye 'bullets' con `- ` como plantilla en pase_prompt (líneas 1638-1655) aunque el sistema exige sin listas — funciona porque es solo para pase_summary, no para la nota. El test confirma que la nota final sí sale sin bullets."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_etapa3.py (nuevo)"
+  ],
+  "success_rate": {
+    "backend": "100% (12/12)",
+    "frontend": "100% (tab Config + 3 textareas + save + persist verificados)"
+  },
+  "test_credentials": "demo@surginote.app / DemoSurgi2026!",
+  "seed_data_creation": "Creados+eliminados en teardown: TEST JUAN MENDOZA GARCIA (via import censo), TEST_PISO_PATIENT, TEST_UTI_PATIENT. Readmit de cualquier paciente real accidentalmente egresado durante import. Training-examples reseteados a vacío al final.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Todas las validaciones de Etapa 3 pasaron. Único bug pendiente: POST /api/patients ValidationError cuando faltan is_surgical/is_pending_discharge. Los tests de /app/backend/tests/test_etapa3.py y test_import_censo.py son la regresión canónica. Ejecutar con `python -m pytest backend/tests/test_etapa3.py -v -o addopts=''` (xdist en pytest.ini requiere workers).",
+  "rca of the issue": "POST /api/patients 500: PatientCreate(BaseModel) declara is_surgical: Optional[bool]=None e is_pending_discharge: Optional[bool]=None (server.py:124-125). En el endpoint create_patient (server.py:365) se hace `Patient(user_id=user['id'], **body.model_dump())`. El modelo Patient (línea 93-94) declara `is_surgical: bool = True` (no Optional). Pydantic rechaza None. Reproducción: `POST /api/patients {name:'X'}` → 500. Mitigación: filtrar None antes de spread, o cambiar defaults en PatientCreate a True/False sin Optional."
+}
