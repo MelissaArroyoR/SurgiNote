@@ -1,55 +1,52 @@
-import { useEffect } from "react";
 import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import axios from "axios";
-import { HOME } from "@/constants/testIds";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { Toaster } from "sonner";
+import { AuthProvider, useAuth } from "@/lib/auth";
+import Login from "@/pages/Login";
+import Shell from "@/pages/Shell";
+import Pacientes from "@/pages/Pacientes";
+import PatientDetail from "@/pages/PatientDetail";
+import Pase from "@/pages/Pase";
+import Notas from "@/pages/Notas";
+import Ingresos from "@/pages/Ingresos";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
-
-const Home = () => {
-  const helloWorldApi = async () => {
-    try {
-      const response = await axios.get(`${API}/`);
-      console.log(response.data.message);
-    } catch (e) {
-      console.error(e, `errored out requesting / api`);
-    }
-  };
-
-  useEffect(() => {
-    helloWorldApi();
-  }, []);
-
-  return (
-    <div>
-      <header className="App-header">
-        <a
-          data-testid={HOME.emergentLink}
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
-        <p className="mt-5">Building something incredible ~!</p>
-      </header>
-    </div>
-  );
-};
+function Protected({ children }) {
+  const { user, ready } = useAuth();
+  if (!ready) return null;
+  if (!user) return <Navigate to="/login" replace />;
+  return children;
+}
 
 function App() {
   return (
-    <div className="App">
+    <AuthProvider>
       <BrowserRouter>
+        <Toaster
+          position="top-center"
+          theme="dark"
+          toastOptions={{
+            style: {
+              background: "#1E293B",
+              border: "1px solid #334155",
+              color: "#F8FAFC",
+              fontFamily: "IBM Plex Sans",
+            },
+          }}
+        />
         <Routes>
-          <Route path="/" element={<Home />}>
-            <Route index element={<Home />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/" element={<Protected><Shell /></Protected>}>
+            <Route index element={<Navigate to="/pacientes" replace />} />
+            <Route path="pacientes" element={<Pacientes />} />
+            <Route path="pacientes/:id" element={<PatientDetail />} />
+            <Route path="pase" element={<Pase />} />
+            <Route path="notas" element={<Notas />} />
+            <Route path="ingresos" element={<Ingresos />} />
           </Route>
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
-    </div>
+    </AuthProvider>
   );
 }
 

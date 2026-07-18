@@ -1,0 +1,29 @@
+{
+  "summary": "Comprehensive backend smoke test for SurgiNote API. All 17 checks passed including auth, patient CRUD, daily entries with labs, GPT-5.2 generation (pase, note, whatsapp) in Spanish, full pase document, and soft delete.",
+  "tested_scope": ["backend", "auth", "integration"],
+  "passed": [
+    "GET /api/ health",
+    "POST /api/auth/login demo user (demo@surginote.app)",
+    "POST /api/auth/register new user",
+    "Auth middleware: missing token -> 403 (FastAPI HTTPBearer default)",
+    "Auth middleware: invalid token -> 401",
+    "GET /api/patients returns list scoped by user",
+    "POST /api/patients creates patient with all fields (name, age, sex, bed, floor, dx_short/full, admission_date, surgery_date, surgery_procedure, surgery_findings, medical_history, consultants, oncology_treatment)",
+    "GET /api/patients/{id} returns patient with days_admission=184 and days_postop=183 auto-calculated",
+    "PATCH /api/patients/{id} updates fields (bed changed)",
+    "GET /api/patients/{id}/entries/today creates entry when missing",
+    "PATCH /api/patients/{id}/entries/today updates dictation/labs/studies/events (including custom date for prev day)",
+    "POST /api/patients/{id}/generate/pase (GPT-5.2, ~4.3s) returned Spanish summary containing DX, QX, CAMBIOS DEL DÍA, COMPARACIÓN DE LABS sections",
+    "POST /api/patients/{id}/generate/note (GPT-5.2, ~8.3s) returned SOAP note (1618 chars) + WhatsApp message (562 chars) in Spanish",
+    "Labs comparison: created day-1 (2026-01-16) and day-2 entries; pase generation successfully compared labs",
+    "POST /api/pase/today aggregates all patients with ai_pase_summary (count=2, contains 'PASE DE VISITA' header)",
+    "DELETE /api/patients/{id} soft-deletes and removes from list"
+  ],
+  "failed": [],
+  "action_items": [
+    "Note: unauthenticated requests return 403 instead of 401 (FastAPI HTTPBearer default when Authorization header is missing). Invalid tokens correctly return 401. If strict 401 is required for missing header, set auto_error=False and handle manually."
+  ],
+  "success_rate": {"backend": "100%", "frontend": "not tested"},
+  "retest_needed": false,
+  "full_testing_deferred": true
+}
