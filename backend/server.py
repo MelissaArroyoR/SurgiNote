@@ -537,67 +537,65 @@ async def generate_pase(patient_id: str, body: GenerateBody, user: dict = Depend
     ctx = build_patient_context(patient)
     prev_labs_block = (
         f"\n\nLABORATORIOS DEL DÍA PREVIO ({prev_entry['date']}):\n{prev_entry['labs']}"
-        if prev_entry else "\n\n(No hay laboratorios previos registrados para comparar.)"
+        if prev_entry else "\n\n(SIN LABORATORIOS PREVIOS PARA COMPARAR.)"
     )
 
     dea = days_between(patient.get('admission_date'))
     dpq = days_between(patient.get('surgery_date'))
 
+    # Prompt 5: Pase automático con estructura fija (secuencia obligatoria) + PLAN
     user_prompt = f"""INFORMACIÓN FIJA DEL PACIENTE:
 {ctx}
 
 INFORMACIÓN DEL DÍA ({target}):
-- Dictado del residente: {today_entry.get('dictation', '')}
-- Laboratorios del día: {today_entry.get('labs', '')}
-- Estudios de imagen / procedimientos: {today_entry.get('studies', '')}
-- Eventos del día: {today_entry.get('events', '')}
+- DICTADO DEL RESIDENTE: {today_entry.get('dictation', '') or 'SIN DICTADO.'}
+- LABORATORIOS: {today_entry.get('labs', '') or 'SIN NUEVOS LABORATORIOS.'}
+- ESTUDIOS DE IMAGEN / PROCEDIMIENTOS: {today_entry.get('studies', '') or 'NINGUNO.'}
+- CULTIVOS: {today_entry.get('cultures', '') or 'NINGUNO.'}
+- PROCEDIMIENTOS: {today_entry.get('procedures', '') or 'NINGUNO.'}
+- SIGNOS VITALES: {today_entry.get('vital_signs', '') or 'ND.'}
+- EVENTOS Y CAMBIOS DEL DÍA: {today_entry.get('events', '') or 'SIN EVENTOS.'}
+- CAMBIOS DE INDICACIONES: {today_entry.get('indications_changes', '') or 'SIN CAMBIOS.'}
 {prev_labs_block}
 
-Genera un RESUMEN ESTRUCTURADO PARA EL PASE DE VISITA en texto plano (sin markdown), siguiendo EXACTAMENTE esta estructura:
+GENERA UN PASE DE VISITA COMPLETO EN UN ÚNICO PÁRRAFO CONTINUO EN MAYÚSCULAS, LISTO PARA LEER EN VOZ ALTA COMO LO HARÍA UN R3 DE CIRUGÍA GENERAL. NO USES BULLETS, LISTAS NI ENCABEZADOS. SIGUE ESTA SECUENCIA OBLIGATORIA:
 
-▎ {patient.get('name','')}  |  Cama {patient.get('bed','ND')} · Piso {patient.get('floor','ND')}
-▎ DEA: {dea} · DPQ: {dpq}
+1. INICIA CON "PACIENTE CON SIGNOS VITALES..." INTERPRETANDO (no copies cifras) — "DENTRO DE PARÁMETROS NORMALES", "CON TENDENCIA A HIPERTENSIÓN", "CON TENDENCIA A HIPOTENSIÓN", "CON TENDENCIA A TAQUICARDIA", "CON TENDENCIA A BRADICARDIA", "CON TENDENCIA A HIPOXIA". Solo agrega una cifra si hay pico máximo/mínimo clínicamente importante (p. ej. "CON TA MÁXIMA DE 170/90 MMHG").
+2. OXÍGENO — solo si aplica: "SIN REQUERIMIENTO DE OXÍGENO" o "CON PUNTAS NASALES A 2 LPM" o "CON PUNTAS NASALES DE ALTO FLUJO A 35 LPM FIO2 80%" o "CON VENTILACIÓN MECÁNICA", terminando con "MANTENIENDO ADECUADA SATURACIÓN".
+3. DOLOR — "REFIERE ADECUADO CONTROL ANALGÉSICO" O "REFIERE MAL CONTROL ANALGÉSICO, ENA X, POR LO QUE SE INDICÓ..." (si hubo rescate/ajuste, mencionarlo).
+4. DIETA — "SE MANTIENE EN AYUNO" o "TOLERANDO ADECUADAMENTE DIETA (LÍQUIDA/BLANDA/ASTRINGENTE/NORMAL)". Si inició VO ayer: "EL DÍA DE AYER SE INICIÓ DIETA...". Conservar abreviaturas BOOST, NPT, NET sin expandir.
+5. NÁUSEAS/VÓMITO — "SIN REFERIR NÁUSEAS O VÓMITO" o "PRESENTÓ UN EPISODIO DE VÓMITO, POR LO QUE SE INDICÓ...".
+6. DIURESIS — "DIURESIS POR MICCIÓN ESPONTÁNEA PRESENTE" o "DIURESIS POR SONDA FOLEY DE CARACTERÍSTICAS CLARAS/HEMATÚRICAS CUANTIFICADA EN X ML" (mencionar total del cierre de turno). Integrar DKH si aplica.
+7. GASES — "CANALIZA GASES" o "PENDIENTE CANALIZACIÓN DE GASES".
+8. EVACUACIONES — "EVACUACIONES PRESENTES DE CARACTERÍSTICAS BRISTOL X" / "EVACUACIONES LÍQUIDAS/BLANDAS" / "EVACUACIONES PENDIENTES".
+9. DRENAJES/SONDAS (solo si el paciente los tiene) — describirlos con gasto y características.
+10. LABORATORIOS — NUNCA copiar valores completos. INTERPRETAR vs previo con este formato exacto: "EL DÍA DE AYER CON DISMINUCIÓN DE LEUCOCITOS DE X A X", "AUMENTO DE HEMOGLOBINA DE X A X", "PERSISTE LEUCOCITOSIS (X MIL)", "PERSISTE HIPOALBUMINEMIA (X)", "MEJORÍA DE FUNCIÓN RENAL", "EMPEORAMIENTO DE FUNCIÓN RENAL", "AUMENTO DE CREATININA DE X A X". Solo cambios relevantes. Omitir normales.
+11. ESTUDIOS — si hubo estudio ayer: "EL DÍA DE AYER SE REALIZÓ TAC/USG/RM/RX/ECOCARDIOGRAMA... CON HALLAZGOS DE..." (resumido, nunca reporte completo).
+12. CAMBIOS DE MEDICAMENTOS — "SE AGREGÓ OLMESARTÁN POR MAL CONTROL HIPERTENSIVO", "SE INICIÓ INSULINA GLARGINA", "SE SUSPENDIÓ VASOPRESINA", etc.
+13. INTERCONSULTAS — "SE INTERCONSULTÓ A MEDICINA INTERNA/NUTRICIÓN/ENDOCRINOLOGÍA/CLÍNICA DE HERIDAS/NEUMOLOGÍA POR..." (si aplica).
+14. PROCEDIMIENTOS DE OTROS SERVICIOS — "EL DÍA DE AYER SE LE REALIZÓ DRENAJE ENDOSCÓPICO / CPRE / HEMODIÁLISIS / ANGIOGRAFÍA..." (si aplica).
+15. REPORTE HISTOPATOLÓGICO — "SALIÓ EL REPORTE HISTOPATOLÓGICO CON REPORTE DE..." (resumir dx, si aplica).
+16. POSTQUIRÚRGICO reciente (si aplica): "EL DÍA DE AYER PASÓ A [PROCEDIMIENTO] CON HALLAZGOS DE [HALLAZGOS]. EN SU POSTQUIRÚRGICO SE HA MANTENIDO CON SIGNOS VITALES..., SE INICIÓ DIETA..., DIURESIS..., DRENAJES...".
 
-DX: (diagnóstico resumido)
-QX: (procedimiento y fecha)
-APP RELEVANTES: (antecedentes en 1 línea; si no hay, omite)
-ONCOLÓGICO: (si aplica; si no, omite la línea completa)
-INTERCONSULTAS ACTIVAS: (lista breve; si no hay, omite)
+INMEDIATAMENTE DESPUÉS DEL PÁRRAFO, EN LÍNEA APARTE, ESCRIBE:
 
-RESUMEN CLÍNICO DEL DÍA:
-- (2-4 bullets con los eventos y cambios clínicamente más relevantes del día)
+PLAN: CONTINUAR DIETA X, ANALGESIA IV, ANTIBIÓTICOS IV, CUANTIFICACIÓN DE DRENAJES/SONDA, VIGILANCIA DE DATOS DE SANGRADO/ABDOMEN AGUDO/DIFICULTAD RESPIRATORIA, LABORATORIOS DE CONTROL EN AM, VALORAR EGRESO SI APLICA.
+(Máximo 2 renglones, separado por comas, sin viñetas, integra SOLO indicaciones vigentes, adáptalo al paciente.)
 
-CAMBIOS DE MEDICAMENTOS:
-- (solo si se mencionaron; escalada/desescalada de antibióticos, ajustes de analgesia, anticoagulación, etc. Si no hay cambios, escribe "Sin cambios en el esquema.")
+REGLAS INAMOVIBLES:
+- TODO EN MAYÚSCULAS.
+- Sin listas, sin viñetas, sin numeración, sin markdown, sin encabezados.
+- Solo un párrafo continuo + PLAN.
+- Nunca inventes datos. Si algo no está, no lo menciones (no escribas "ND" ni "sin datos aportados").
+- Nunca uses frases tipo ChatGPT ("OJO", "LLAMA LA ATENCIÓN", "SE SUGIERE", "SE RECOMIENDA").
+- Nunca copies texto del expediente. Reescribe todo con lenguaje de residente."""
 
-ESTUDIOS / PROCEDIMIENTOS:
-- (resumen conciso de imágenes o procedimientos; si no hay, escribe "Ninguno.")
-
-POR SISTEMAS: (INCLUYE esta sección SOLO si el paciente está en UTI, UTIM o con múltiples sistemas comprometidos. Si es piso general y estable, OMITE esta sección completa)
-- Neurológico: ...
-- Respiratorio: ...
-- Hemodinámico: ...
-- Renal / metabólico: ...
-- Gastrointestinal / nutricional: ...
-- Infeccioso: ...
-- Hematológico: ...
-
-CAMBIOS RELEVANTES EN LABORATORIOS:
-- (NO copies valores completos. Identifica SOLO tendencias clínicamente relevantes comparando vs día previo cuando exista. Ejemplos del estilo requerido: "Leucocitos en descenso (14 → 9.8 mil, mejoría)", "Creatinina estable", "Hipokalemia corregida (3.1 → 4.0)", "PCR en aumento (45 → 78)", "Hb estable sin datos de sangrado". Si no hay previos, indica solo los valores actuales anormales; los normales se omiten o mencionas "Sin alteraciones relevantes".)
-
-⚡ SUGERENCIA DE IA — PLAN SUGERIDO:
-- (2-5 bullets con propuestas concretas de manejo basadas en la información disponible. Formato claro y accionable. Al final agrega la línea: "— Requiere validación del médico responsable —")
-
-PENDIENTES / A DISCUTIR:
-- (puntos concretos para conversar en el pase; interconsultas pendientes, definiciones, estudios por solicitar)
-
-Reglas estrictas:
-1. NO inventes datos. Si algo no está en la información entregada, escribe "ND" o omite la línea.
-2. Toda propuesta terapéutica debe ir SOLO bajo la sección "⚡ SUGERENCIA DE IA".
-3. El resto de secciones deben ser factuales, extraídas exclusivamente del dictado/labs/estudios/eventos.
-4. Español médico. Terminología precisa. Sin adornos ni saludos."""
-
-    system = "Eres un asistente experto para un residente de cirugía general. Organizas y resumes información clínica proporcionada por el usuario. NO inventas datos clínicos ni sustituyes el juicio médico. Las propuestas terapéuticas van únicamente bajo la etiqueta 'SUGERENCIA DE IA'. El resto es organización factual de lo que el usuario dictó."
+    system = (
+        "Eres RESIDENTE R3 DE CIRUGÍA GENERAL del HOSPITAL ÁNGELES presentando el pase de "
+        "visita en voz alta al equipo. Escribe TODO EN MAYÚSCULAS en un solo párrafo continuo "
+        "siguiendo la secuencia obligatoria. Interpretas signos vitales y laboratorios (no "
+        "copias cifras crudas). Nunca inventes datos. Nunca uses frases de IA."
+    )
     text = await llm_generate(system, user_prompt)
 
     await db.daily_entries.update_one(
@@ -653,19 +651,23 @@ async def generate_note(patient_id: str, body: GenerateBody, user: dict = Depend
             "FORMATO OBLIGATORIO (imitando los ejemplos permanentes de UTI/UTIM del servicio):\n"
             "1. Inicia con el encabezado exacto: 'NOTA DE EVOLUCIÓN POR CIRUGÍA GENERAL EN UTI' "
             "(o EN UTIM si aplica), en la línea 1.\n"
-            "2. Segundo párrafo: 'SE TRATA DE ...' con edad, nombre, diagnóstico, fecha y "
-            "procedimiento quirúrgico + hallazgos si aplica. Un solo párrafo corrido.\n"
+            "2. Segundo párrafo — INTRODUCCIÓN EXACTA: 'SE TRATA DE PACIENTE MASCULINO/FEMENINO DE "
+            "XX AÑOS, NOMBRE COMPLETO, CON DIAGNÓSTICO DE __________ POR LO QUE EL DÍA __________ "
+            "SE LE REALIZÓ __________ CON HALLAZGOS DE __________.' NUNCA separes cirugía de hallazgos. "
+            "NUNCA incluyas ANTECEDENTE DE, T4N3M1, EC IVA, ECOG, LIGHT, CAPRINI, PADUA, ROCKALL, "
+            "ASA ni ninguna clasificación. Solo diagnósticos activos.\n"
             "3. Tercer párrafo: comienza con 'AL PASE DE VISITA SE ENCUENTRA EN LO NEUROLÓGICO ...' "
             "y ENUMERA en el mismo párrafo corrido los aparatos y sistemas EN ESTE ORDEN OBLIGATORIO: "
             "NEUROLÓGICO → RESPIRATORIO → CARDIOVASCULAR → GASTRO METABÓLICO → HÍDRICO URINARIO → "
             "HEMATOINFECCIOSO. Cada sistema con la fórmula 'EN LO [SISTEMA] ...' seguido de la "
             "información. No usar listas ni viñetas.\n"
             "4. Párrafo de exploración: comienza con 'A LA EXPLORACIÓN FÍSICA ...' en párrafo corrido, "
-            "en el orden habitual (cabeza y cuello, tórax, abdomen, extremidades).\n"
-            "5. 'PLAN: ...' en un párrafo corrido, separado por comas (ayuno, soluciones, analgesia, "
-            "antibioticoterapia IV, rutina de UTI, vigilancia hemodinámica, cuantificación de "
-            "drenajes/sondas, toma de laboratorios AM, etc.).\n"
-            "6. Cierra con 'PRONÓSTICO RESERVADO A EVOLUCIÓN' en una línea sola.\n"
+            "en el orden habitual (cabeza y cuello, tórax, abdomen, extremidades). Nunca escribas "
+            "'SIN DATOS APORTADOS', 'SIN EVIDENCIA DOCUMENTADA', 'SIN HALLAZGOS REPORTADOS'.\n"
+            "5. 'PLAN: ...' en UN SOLO renglón o máximo 2, separado por comas (ayuno/dieta, soluciones, "
+            "analgesia IV, antibioticoterapia IV, rutina de UTI, vigilancia hemodinámica, "
+            "cuantificación de drenajes/sondas, toma de laboratorios AM). NUNCA viñetas ni recomendaciones tipo ChatGPT.\n"
+            "6. Cierra con 'PRONÓSTICO RESERVADO A EVOLUCIÓN.' en una línea sola.\n"
             "7. TODA la nota en MAYÚSCULAS. Sin listas, sin viñetas, sin numeración, sin markdown."
         )
     else:
@@ -673,20 +675,39 @@ async def generate_note(patient_id: str, body: GenerateBody, user: dict = Depend
             "FORMATO OBLIGATORIO (imitando los ejemplos permanentes de HOSPITALIZACIÓN del servicio):\n"
             "1. Inicia con 'NOTA DE EVOLUCIÓN POR CIRUGÍA GENERAL' en la línea 1 (o "
             "'NOTA DE EVOLUCIÓN POR CIRUGÍA GENERAL / [SUBESPECIALIDAD]' si aplica).\n"
-            "2. Segundo párrafo: 'SE TRATA DE PACIENTE MASCULINO/FEMENINO DE X AÑOS, NOMBRE COMPLETO, "
-            "CON DIAGNÓSTICO DE ...' con diagnóstico, fecha y procedimiento QX + hallazgos si aplica.\n"
-            "3. Tercer párrafo: comienza con 'AL PASE DE VISITA SE ENCUENTRA CON SIGNOS VITALES ...' "
-            "en un párrafo corrido que integra naturalmente: signos vitales, control analgésico, "
-            "dieta, náuseas/vómitos, diuresis, evacuaciones, canalización de gases, drenajes con "
-            "gasto, antibióticos, cultivos y estudios importantes. NO uses viñetas.\n"
-            "4. Cuarto párrafo: comienza con 'A LA EXPLORACIÓN FÍSICA ALERTA, REACTIVO, COOPERADOR' "
+            "2. Segundo párrafo — INTRODUCCIÓN EXACTA: 'SE TRATA DE PACIENTE MASCULINO/FEMENINO DE "
+            "XX AÑOS, NOMBRE COMPLETO, CON DIAGNÓSTICO DE __________ POR LO QUE EL DÍA __________ "
+            "SE LE REALIZÓ __________ CON HALLAZGOS DE __________.' NUNCA separes cirugía de hallazgos. "
+            "NUNCA incluyas ANTECEDENTE DE, T4N3M1, EC IVA, ECOG, LIGHT, CAPRINI, PADUA, ROCKALL, "
+            "ASA ni ninguna clasificación. Solo diagnósticos activos.\n"
+            "3. Tercer párrafo: comienza con 'AL PASE DE VISITA SE ENCUENTRA ...' en un párrafo "
+            "corrido que integra naturalmente: signos vitales INTERPRETADOS (nunca cifras crudas — "
+            "usa 'SIGNOS VITALES DENTRO DE PARÁMETROS NORMALES', 'CON TENDENCIA A HIPERTENSIÓN', "
+            "'CON TENDENCIA A HIPOTENSIÓN', 'AFEBRIL'), oxígeno si aplica ('CON PUNTAS NASALES A X LPM' "
+            "o 'CON PUNTAS NASALES DE ALTO FLUJO A X LPM FIO2 X%' o 'CON VENTILACIÓN MECÁNICA' + "
+            "'MANTENIENDO SATURACIÓN ADECUADA'), dolor SOLO con estas fórmulas: 'ADECUADO CONTROL "
+            "ANALGÉSICO' / 'MAL CONTROL ANALGÉSICO, REFIERE ENA EN X, POR LO QUE SE INDICÓ X' / "
+            "'PARCIAL CONTROL ANALGÉSICO, REFIERE ENA EN X, POR LO QUE SE INDICÓ X' (NUNCA 'DOLOR "
+            "CONTROLADO'), dieta con abreviaturas del servicio SIN EXPANDIR (BOOST, NPT, NET), "
+            "'SIN REFERIR NÁUSEAS O VÓMITO' (nunca 'SIN REFERENCIA DE...'), 'DIURESIS POR MICCIÓN "
+            "ESPONTÁNEA...' o 'DIURESIS POR SONDA FOLEY DE CARACTERÍSTICAS CLARAS/HEMATÚRICAS "
+            "CUANTIFICADA EN...' (integrar DKH si aplica), 'EVACUACIONES PRESENTES DE "
+            "CARACTERÍSTICAS BRISTOL X' o 'EVACUACIONES PENDIENTES', drenajes con gasto y "
+            "características, antibióticos si aplica.\n"
+            "4. Laboratorios interpretados dentro del mismo párrafo o al final: NUNCA copies "
+            "biometrías completas. Usa: 'DISMINUCIÓN DE LEUCOCITOS DE X A X', 'AUMENTO DE "
+            "HEMOGLOBINA DE X A X', 'PERSISTE LEUCOCITOSIS (X MIL)', 'PERSISTE HIPOALBUMINEMIA (X)', "
+            "'MEJORÍA DE FUNCIÓN RENAL', 'EMPEORAMIENTO DE FUNCIÓN RENAL'. Solo cambios relevantes.\n"
+            "5. Cuarto párrafo: comienza con 'A LA EXPLORACIÓN FÍSICA ALERTA, REACTIVO, COOPERADOR' "
             "(o similar) y describe cabeza y cuello, cardiorrespiratorio, abdomen con herida y "
-            "drenajes, extremidades. Un solo párrafo corrido.\n"
-            "5. 'PLAN: ...' en un párrafo corrido, separado por comas (dieta, soluciones, analgesia "
-            "IV, cuidados de herida, cuantificación de drenajes, vigilancia de datos de abdomen "
-            "agudo, toma de laboratorios AM, etc.).\n"
-            "6. Cierra con 'PRONÓSTICO RESERVADO A EVOLUCIÓN' en una línea sola.\n"
-            "7. TODA la nota en MAYÚSCULAS. Sin listas, sin viñetas, sin numeración, sin markdown."
+            "drenajes, extremidades. Un solo párrafo corrido. Nunca 'SIN DATOS APORTADOS', "
+            "'SIN EVIDENCIA DOCUMENTADA', 'SIN HALLAZGOS REPORTADOS'.\n"
+            "6. 'PLAN: ...' en UN SOLO renglón o máximo 2, separado por comas: "
+            "'PLAN: AYUNO/DIETA X, ANALGESIA IV, ANTIBIÓTICOS IV, CUANTIFICACIÓN DE DRENAJES/SONDA, "
+            "VIGILANCIA DE DATOS DE SANGRADO/DIFICULTAD RESPIRATORIA/ABDOMEN AGUDO'. NUNCA viñetas, "
+            "NUNCA recomendaciones tipo ChatGPT.\n"
+            "7. Cierra con 'PRONÓSTICO RESERVADO A EVOLUCIÓN.' en una línea sola.\n"
+            "8. TODA la nota en MAYÚSCULAS. Sin listas, sin viñetas, sin numeración, sin markdown."
         )
 
     system = (
@@ -717,27 +738,22 @@ async def generate_note(patient_id: str, body: GenerateBody, user: dict = Depend
 
     note = await llm_generate(system, user_prompt)
 
-    # WhatsApp — Prompt 4: estilo natural de residente, capitalización NORMAL (no mayúsculas)
+    # WhatsApp — Prompt 5: solo primer nombre + (cama), sin edad/dx/DPQX/DEIH,
+    # signos vitales interpretados, labs solo si cambian conducta, sin frases IA.
     wa_user_examples = _style_block(training.get("whatsapp_examples", ""), "MENSAJES DEL PROPIO USUARIO")
     wa_builtin_examples = whatsapp_style_block()
 
-    dr_last_raw = _extract_dr_lastname(patient.get("attending_physician"))
-    dr_last = dr_last_raw.title() if dr_last_raw and dr_last_raw != "________" else ""
-    patient_name = (patient.get("name") or "").strip().title()
+    # Extraer SOLO el primer nombre del paciente
+    full_name = (patient.get("name") or "").strip()
+    first_name = full_name.split()[0].title() if full_name else "________"
     patient_bed = (patient.get("bed") or "").strip()
-    saludo_hint = (
-        f"Puedes iniciar con alguna de estas fórmulas naturales: "
-        f"'Buenos días doctor, pasé a ver a {patient_name} ({patient_bed})...' / "
-        f"'Buenos días Doctor!! Pase a ver a {patient_name} ({patient_bed})...' / "
-        f"'Hola doctor buenos días! Pasé a ver a {patient_name} de {patient_bed}...' / "
-        f"'Buenos días doctores! Acerca de {patient_name} ({patient_bed})...' "
-        f"(varía según el tono de los ejemplos)."
-    )
+
     wa_prompt = (
-        f"Redacta un mensaje de WhatsApp para el médico tratante como lo enviaría un R3 de "
-        f"Cirugía General del Hospital Ángeles. Estilo NATURAL, CONVERSACIONAL, respetuoso pero "
-        f"coloquial, capitalización NORMAL (NO mayúsculas). Un solo párrafo corrido.\n\n"
-        f"DATOS DEL PACIENTE:\n{ctx}\n\n"
+        f"Redacta un mensaje de WhatsApp corto para el médico tratante como lo enviaría un R3 de "
+        f"Cirugía General del Hospital Ángeles. Estilo natural, conversacional, breve. Un solo "
+        f"párrafo corrido. Capitalización normal (NO mayúsculas).\n\n"
+        f"DATOS INTERNOS (usa solo lo necesario, NO copies nombre completo, edad, diagnóstico, "
+        f"DPQX ni DEIH en el mensaje):\n{ctx}\n\n"
         f"DATOS DEL DÍA ({target}):\n"
         f"- Dictado: {entry.get('dictation', '') or 'sin dictado.'}\n"
         f"- Labs: {entry.get('labs', '') or 'sin nuevos labs.'}\n"
@@ -746,29 +762,38 @@ async def generate_note(patient_id: str, body: GenerateBody, user: dict = Depend
         f"- Cultivos: {entry.get('cultures', '') or 'ninguno.'}\n"
         f"- Signos vitales: {entry.get('vital_signs', '') or 'estables.'}\n"
         f"- Eventos: {entry.get('events', '') or 'sin eventos.'}\n\n"
-        f"REGLAS DE ESTILO (mira los ejemplos permanentes al final):\n"
-        f"- Capitalización NORMAL, NO mayúsculas.\n"
-        f"- Un solo párrafo corrido. No listas. No viñetas. No numeración. No markdown.\n"
-        f"- {saludo_hint}\n"
-        f"- Incluye SOLO lo relevante: estado general, dolor, dieta, náuseas/vómitos, diuresis, "
-        f"evacuaciones, drenajes con gasto y características, cultivos/estudios importantes, "
-        f"antibióticos si aplica, hallazgos de exploración pertinentes.\n"
-        f"- Si hay una decisión pendiente puedes terminar con una pregunta natural del tipo: "
-        f"'¿Gusta que retiremos el drenaje?', '¿Gusta que iniciemos vía oral?', "
-        f"'¿Gusta que solicitemos TAC?', '¿Gusta que valoremos egreso?'. Si NO hay decisión "
-        f"pendiente, cierra de manera natural como en los ejemplos "
-        f"('Quedo pendiente cualquier cosa, saludos!', 'Saludos y bonito día', "
-        f"'Lindo día doc!', 'Quedamos al pendiente', etc.).\n"
-        f"- Nunca inventes datos. Nunca suenes robótico. Nunca digas 'se informa que'.\n"
-        f"- Longitud: entre 4 y 10 líneas de mensaje natural.\n"
+        f"REGLAS OBLIGATORIAS:\n"
+        f"- INICIA con esta fórmula exacta: 'Buenos días Dr, pasé a ver a {first_name} ({patient_bed}), está con...' "
+        f"(o una variante muy cercana como 'Buenos días Dr, pase a ver a {first_name} ({patient_bed})...' / "
+        f"'Hola doctor buenos días! Pasé a ver a {first_name} ({patient_bed})...').\n"
+        f"- USA SOLO EL PRIMER NOMBRE ({first_name}) — NUNCA el nombre completo.\n"
+        f"- NUNCA menciones edad, diagnóstico, DPQX ni DEIH.\n"
+        f"- Interpreta signos vitales (NO copies cifras): 'signos vitales estables', "
+        f"'con tendencia a hipertensión', 'con tendencia a hipotensión', 'afebril', "
+        f"'con tendencia a taquicardia'. Solo agrega una cifra si hay un pico clínicamente importante.\n"
+        f"- Dolor: 'refiere buen control analgésico' o 'refiere mal control analgésico...'. Nunca 'dolor controlado'.\n"
+        f"- Dieta: 'tolera bien la dieta X' o 'en ayuno'. Abreviaturas BOOST/NPT/NET sin expandir.\n"
+        f"- 'sin referir náuseas o vómito' (nunca 'sin referencia de').\n"
+        f"- Diuresis: 'diuresis por micción espontánea' o 'diuresis por sonda Foley cuantificada en X'. Menciona drenajes con gasto si aplica ('Pleurex con gasto...').\n"
+        f"- Laboratorios: solo menciónalos si cambian conducta. Ejemplos: 'leucocitos subieron a 41 mil', 'Hb bajó a 6.8', 'glucosa en 286 ya en manejo con glargina'. Nunca comentes labs normales.\n"
+        f"- NUNCA uses: 'OJO', 'llama la atención', 'se sugiere', 'se recomienda', 'se informa que'.\n"
+        f"- A veces (SOLO si hay decisión pendiente) termina con UNA sola pregunta: "
+        f"'¿Gusta que retiremos el drenaje?', '¿Gusta que ajustemos la analgesia?', "
+        f"'¿Gusta que iniciemos vía oral?', '¿Gusta que solicitemos TAC?', '¿Gusta que valoremos egreso?'. "
+        f"Si NO hay decisión pendiente, cierra natural ('Quedo al pendiente, saludos!', 'Lindo día doc!', "
+        f"'Saludos y bonito día').\n"
+        f"- Un solo párrafo corrido. Sin listas. Sin viñetas. Sin markdown.\n"
+        f"- Nunca inventes datos. Nunca suenes como IA.\n"
         f"{wa_builtin_examples}"
         f"{wa_user_examples}"
-        f"\nDevuelve SOLO el mensaje de WhatsApp, sin comentarios, sin comillas, sin explicación."
+        f"\nDevuelve SOLO el mensaje de WhatsApp, sin comentarios."
     )
     system_wa = (
-        "Eres residente R3 de Cirugía General del Hospital Ángeles enviando WhatsApp real al "
-        "médico tratante. Escribe NATURAL, en capitalización normal (nunca todo mayúsculas), "
-        "un solo párrafo corrido, respetuoso pero coloquial. Nunca sonar como IA. Nunca inventar datos."
+        "Eres residente R3 de Cirugía General del Hospital Ángeles enviando WhatsApp corto al "
+        "médico tratante. Solo primer nombre y cama del paciente — NUNCA nombre completo, edad, "
+        "diagnóstico, DPQX ni DEIH. Interpretas signos vitales y labs (no cifras crudas salvo "
+        "picos relevantes). Un solo párrafo corrido, capitalización normal. Nunca sonar a IA. "
+        "Nunca decir 'OJO', 'llama la atención', 'se sugiere', 'se recomienda'."
     )
     wa = await llm_generate(system_wa, wa_prompt)
 
@@ -1778,43 +1803,44 @@ Reglas estrictas:
     )
     note_text = await llm_generate(system_note, note_prompt)
 
-    # 3) WHATSAPP — Prompt 4: estilo natural residente, capitalización normal, con few-shots
+    # 3) WHATSAPP — Prompt 5: solo primer nombre + (cama), sin edad/dx/DPQX/DEIH
     wa_user_examples = _style_block(training.get("whatsapp_examples", ""), "MENSAJES DEL PROPIO USUARIO")
     wa_builtin_examples = whatsapp_style_block()
-    patient_name = (patient.get("name") or "").strip().title()
+    full_name = (patient.get("name") or "").strip()
+    first_name = full_name.split()[0].title() if full_name else "________"
     patient_bed = (patient.get("bed") or "").strip()
-    saludo_hint = (
-        f"Puedes iniciar con: 'Buenos días doctor, pasé a ver a {patient_name} ({patient_bed})...' / "
-        f"'Buenos días Doctor!! Pase a ver a {patient_name} ({patient_bed})...' / "
-        f"'Hola doctor buenos días! Pasé a ver a {patient_name} de {patient_bed}...' / "
-        f"'Buenos días doctores! Acerca de {patient_name} ({patient_bed})...' (varía el tono como en los ejemplos)."
-    )
     wa_prompt = (
         f"Redacta un mensaje de WhatsApp corto (paciente estable, sin cambios) como lo enviaría un R3 "
-        f"de Cirugía General del Hospital Ángeles al médico tratante. Estilo natural, capitalización "
-        f"NORMAL (NO mayúsculas), un solo párrafo corrido.\n\n"
-        f"DATOS:\n{ctx}\n\n"
+        f"de Cirugía General del Hospital Ángeles al médico tratante. Un solo párrafo corrido, "
+        f"capitalización normal (NO mayúsculas).\n\n"
+        f"DATOS INTERNOS (usa solo lo necesario, NO copies nombre completo, edad, diagnóstico, "
+        f"DPQX ni DEIH en el mensaje):\n{ctx}\n\n"
         f"Labs de hoy: {today_entry.get('labs', '') or 'sin nuevos labs.'}\n"
         f"Estudios: {today_entry.get('studies', '') or 'ninguno.'}\n\n"
-        f"REGLAS:\n"
-        f"- Capitalización normal, NO mayúsculas.\n"
-        f"- Un solo párrafo corrido. Sin listas.\n"
-        f"- {saludo_hint}\n"
-        f"- Refleja estabilidad clínica: sin cambios en 24h, tolerando dieta, dolor controlado, "
-        f"diuresis y evacuaciones normales, drenajes con gasto reportado si aplica.\n"
-        f"- Termina de manera natural. Si hay decisión pendiente puedes preguntar: "
-        f"'¿Gusta que continuemos mismo esquema?', '¿Gusta que valoremos egreso?', "
-        f"'¿Gusta que iniciemos vía oral?'. Si no, cierra como en los ejemplos ('Quedo pendiente "
-        f"cualquier cosa, saludos!', 'Lindo día doc!', 'Saludos y bonito día', etc.).\n"
-        f"- Nunca inventes datos. Nunca suenes robótico.\n"
+        f"REGLAS OBLIGATORIAS:\n"
+        f"- INICIA con: 'Buenos días Dr, pasé a ver a {first_name} ({patient_bed}), está con...' "
+        f"o variante muy cercana.\n"
+        f"- Solo primer nombre ({first_name}). NUNCA nombre completo, edad, dx, DPQX ni DEIH.\n"
+        f"- Interpreta signos vitales: 'signos vitales estables', 'afebril', 'con tendencia a hipertensión'.\n"
+        f"- Refleja estabilidad: sin cambios en 24h, tolera dieta, refiere buen control analgésico, "
+        f"diuresis por micción espontánea, drenajes con gasto si aplica.\n"
+        f"- Labs SOLO si cambian conducta. Nunca menciones labs normales.\n"
+        f"- NUNCA uses: 'OJO', 'llama la atención', 'se sugiere', 'se recomienda', 'se informa que'.\n"
+        f"- Si hay decisión pendiente termina con UNA sola pregunta: '¿Gusta que continuemos mismo "
+        f"esquema?', '¿Gusta que valoremos egreso?', '¿Gusta que iniciemos vía oral?'. "
+        f"Si no, cierre natural: 'Quedo al pendiente, saludos!', 'Lindo día doc!', 'Saludos y bonito día'.\n"
+        f"- Un solo párrafo corrido. Sin listas. Sin markdown.\n"
+        f"- Nunca inventes datos.\n"
         f"{wa_builtin_examples}"
         f"{wa_user_examples}"
-        f"\nDevuelve SOLO el mensaje, sin comentarios ni explicación."
+        f"\nDevuelve SOLO el mensaje."
     )
     system_wa = (
-        "Eres residente R3 de Cirugía General del Hospital Ángeles enviando WhatsApp real al "
-        "médico tratante para un paciente estable. Capitalización normal (no mayúsculas), un "
-        "solo párrafo corrido, tono coloquial y respetuoso. Nunca sonar como IA. Nunca inventar datos."
+        "Eres residente R3 de Cirugía General del Hospital Ángeles enviando WhatsApp corto al "
+        "médico tratante para un paciente estable. Solo primer nombre y cama del paciente — "
+        "NUNCA nombre completo, edad, diagnóstico, DPQX ni DEIH. Un solo párrafo corrido, "
+        "capitalización normal. Interpreta signos vitales y labs. Nunca sonar a IA. "
+        "Nunca 'OJO', 'llama la atención', 'se sugiere', 'se recomienda'."
     )
     wa_text = await llm_generate(system_wa, wa_prompt)
 
