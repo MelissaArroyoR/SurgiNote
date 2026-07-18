@@ -748,33 +748,67 @@ _CULT_KW = _re.compile(
 
 def _classify_col5_text(text: str) -> dict:
     """Split a big text block (usually column 5) into labs/studies/procedures/cultures.
-    Splits by blank-line paragraphs; classifies each paragraph by strongest keyword match.
-    Anything unclassified goes to `events`. Preserves original formatting (no summary).
+    Strategy: split by KEYWORD BOUNDARIES so each keyword starts its own chunk.
+    This prevents a single labs keyword from absorbing subsequent imaging/procedure/culture content.
     """
     if not text or not text.strip():
         return {"labs": "", "studies": "", "procedures": "", "cultures": "", "events": ""}
-    # Split by 2+ newlines OR by lines starting with a date (dd/mm...)
     raw = text.strip()
-    # First try double-newline split; if it yields only 1 block, split by single newline
-    blocks = [b.strip() for b in _re.split(r"\n\s*\n", raw) if b.strip()]
-    if len(blocks) <= 1:
-        blocks = [b.strip() for b in raw.split("\n") if b.strip()]
+
+    # Keyword-anchored splitter: chunk boundary starts BEFORE any of these keywords.
+    _SPLIT_ANCHOR = _re.compile(
+        r"(?=(?:^|\n|\s{2,}|(?<=[\s\.\;]))"
+        r"(?:LABS|GASA|GASV|EGO|BH|QS|PFH|"
+        r"TAC(?:\s+(?:ABD|TX|C\/C|IV|VO))?|ANGIOTAC|RXTX|RX\b|RMN?\b|USG|"
+        r"PET[\-\s]?CT|ECG\b|ECOCARDIOGRAMA|ECO\b|SEGD|MASTOGRAF|"
+        r"COLONOSCOPIA|ENDOSCOPIA|RHP\b|CIRUG[IÍ]A|HALLAZGOS|PARACENTESIS|"
+        r"TORACOCENTESIS|BIOPSIAS?|DRENAJES?|"
+        r"HEMOCULTIVOS?|UROCULTIVOS?|CULTIVOS?|GRAM\b|BLEE\b|"
+        r"SUSCEPTIBILIDAD|DESARROLLO|MICROORGANISMOS?|ANTIBIOGRAMA)\b)",
+        _re.IGNORECASE,
+    )
+    # Also split by dates on their own line (fecha subrayada)
+    _DATE_SPLIT = _re.compile(r"(?=\b\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b)")
+
+    # First split by keyword anchors
+    chunks = _SPLIT_ANCHOR.split(raw)
+    # Then, refine: split each chunk by date boundaries if it has multiple dates
+    refined: list[str] = []
+    for ch in chunks:
+        ch = ch.strip()
+        if not ch:
+            continue
+        subs = _DATE_SPLIT.split(ch)
+        for s in subs:
+            s = s.strip()
+            if s:
+                refined.append(s)
+
+    if not refined:
+        refined = [raw]
 
     bins = {"labs": [], "studies": [], "procedures": [], "cultures": [], "events": []}
 
-    for block in blocks:
+    # Classify each chunk by its FIRST keyword match (most specific first)
+    for chunk in refined:
         scores = {
-            "cultures": len(_CULT_KW.findall(block)),
-            "studies": len(_IMAGING_KW.findall(block)),
-            "procedures": len(_PROC_KW.findall(block)),
-            "labs": len(_LABS_KW.findall(block)),
+            "cultures": len(_CULT_KW.findall(chunk)),
+            "studies": len(_IMAGING_KW.findall(chunk)),
+            "procedures": len(_PROC_KW.findall(chunk)),
+            "labs": len(_LABS_KW.findall(chunk)),
         }
-        # cultures wins over labs when tied (cultures is more specific)
-        best = max(scores, key=lambda k: (scores[k], ["events", "labs", "procedures", "studies", "cultures"].index(k)))
-        if scores[best] == 0:
-            bins["events"].append(block)
+        # Priority when tied: cultures > studies > procedures > labs (specificity)
+        priority = ["cultures", "studies", "procedures", "labs"]
+        best = None
+        best_score = 0
+        for cat in priority:
+            if scores[cat] > best_score:
+                best = cat
+                best_score = scores[cat]
+        if best_score == 0:
+            bins["events"].append(chunk)
         else:
-            bins[best].append(block)
+            bins[best].append(chunk)
 
     return {k: "\n\n".join(v) for k, v in bins.items()}
 
@@ -824,82 +858,82 @@ def _cell_classification_score(text: str) -> int:
 
 
 def _parse_row_deterministic(cells: list[str]) -> Optional[dict]:
-    """POSITIONAL parser (fixed column layout):
-    COL 0: bed, tratante, residentes...
-    COL 1: name, edad, DEIH, DPQX
-    COL 2: ignored
-    COL 3: diagnósticos (arriba) + indicaciones (abajo)
-    COL 4: labs/studies/procedures/cultures (5th column)
-    COL 5: signos vitales (6th column)
-    Returns dict or raises ValueError if a suspected tratante was placed in name slot.
+    """POSITIONAL parser (fixed layout, 1-indexed like user spec):
+    COL 1 (idx 0): bed + tratante + residentes
+    COL 2 (idx 1): name + edad + DEIH + DPQX
+    COL 3 (idx 2): DIAGNÓSTICOS (ONLY diagnoses, never indications)
+    COL 4 (idx 3): INDICACIONES médicas (goes to important_medications, NEVER to dx)
+    COL 5 (idx 4): labs / gabinete (classified into labs/studies/procedures/cultures)
+    COL 6 (idx 5): signos vitales
     """
     if not any(c.strip() for c in cells):
         return None
-    # Pad to 6 cells
     while len(cells) < 6:
         cells.append("")
 
     p: dict = {}
 
-    # ---- COL 0: bed + attending + residents ----
+    # ---- COL 1 (idx 0): bed + attending + residents ----
     col0_lines = [ln.strip() for ln in cells[0].split("\n") if ln.strip()]
     if col0_lines:
         m = _BED_RE.search(col0_lines[0])
         if m:
             p["bed"] = m.group(1).upper()
         if len(col0_lines) >= 2:
-            att = col0_lines[1].strip()
-            # Normalize: "APELLIDO DR" or "APELLIDO DRA" is the attending
-            p["attending_physician"] = att
+            p["attending_physician"] = col0_lines[1].strip()
 
-    # ---- COL 1: name + age + DEIH + DPQX ----
+    # ---- COL 2 (idx 1): name + age (validation) ----
     col1_lines = [ln.strip() for ln in cells[1].split("\n") if ln.strip()]
     if not col1_lines:
         return None
     raw_name = col1_lines[0].strip()
-    # VALIDATION: name must NOT end with DR/DRA/DR./DRA. (alignment lost)
     if _re.search(r"\bDRA?\.?\s*$", raw_name, _re.IGNORECASE):
         raise ValueError(
             f"Alineamiento de columnas perdido: nombre '{raw_name}' termina en DR/DRA. Se cancela la importación."
         )
     p["name"] = raw_name
-
     if len(col1_lines) >= 2:
         m = _re.search(r"\b(\d{1,3})\b", col1_lines[1])
         if m:
             try: p["age"] = int(m.group(1))
             except Exception: pass
 
-    # DEIH / DPQX in col 1 remaining lines (not stored on patient, calculated from dates elsewhere)
+    # ---- COL 3 (idx 2): DIAGNÓSTICOS ONLY ----
+    # Defensive: strip lines that look like drug orders (dose, route, freq), imaging keywords,
+    # labs, procedures, cultures — those don't belong here.
+    _DRUG_RE = _re.compile(
+        r"(?:\d+\s*(?:mg|g|mcg|mcgs|ml|ml/h|ml/hr|UI|meq|gtas?|comp|caps|cc)\b"
+        r"|c/\d+\s*h\b"
+        r"|\b(?:IV|VO|SL|IM|SC|EV|PO)\b"
+        r"|\b(?:PRN|c/8|c/12|c/24|c/6)\b)",
+        _re.IGNORECASE,
+    )
+    dx_cell = cells[2].strip()
+    dx_clean: list[str] = []
+    for line in dx_cell.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        if _cell_classification_score(s) > 0:
+            continue  # skip: imaging/labs/proc/culture accidental
+        if _DRUG_RE.search(s):
+            continue  # skip: it's actually an indication that leaked in
+        # Skip lines that are ONLY numbers or ONLY DEIH/DPQX
+        if _re.fullmatch(r"\s*(DEIH|DPQX)?\s*\d*\s*", s, _re.IGNORECASE):
+            continue
+        dx_clean.append(s)
+    if dx_clean:
+        p["dx_short"] = dx_clean[0][:200]
+        p["dx_full"] = "\n".join(dx_clean)[:2000]
 
-    # ---- COL 2: ignored ----
+    # ---- COL 4 (idx 3): INDICACIONES → important_medications (NEVER dx) ----
+    ind_text = cells[3].strip()
+    if ind_text:
+        # Store raw as important_medications (user request) AND stash for diff
+        p["important_medications"] = ind_text[:4000]
+        p["_indications_text"] = ind_text  # ephemeral: used for indications_changes diff
 
-    # ---- COL 3: dx + indicaciones ----
-    col3_text = cells[3].strip()
-    if col3_text:
-        # Heuristic split: everything up to a blank line or up to a line containing
-        # "Indicaciones" is dx. Rest is indications.
-        parts = _re.split(r"\n\s*(?:Indicaciones?|Ind\.|INDICACIONES)\s*[:\-]?\s*\n", col3_text, maxsplit=1, flags=_re.IGNORECASE)
-        dx_text = parts[0].strip()
-        ind_text = parts[1].strip() if len(parts) > 1 else ""
-        if not ind_text:
-            # If no explicit "Indicaciones" header, take first paragraph as dx, rest as indications
-            paragraphs = [pp.strip() for pp in _re.split(r"\n\s*\n", col3_text) if pp.strip()]
-            if len(paragraphs) >= 2:
-                dx_text = paragraphs[0]
-                ind_text = "\n\n".join(paragraphs[1:])
-        # Filter out any accidental imaging/lab/proc/culture lines from dx
-        dx_clean = [
-            ln for ln in dx_text.split("\n")
-            if ln.strip() and _cell_classification_score(ln) == 0
-        ]
-        if dx_clean:
-            p["dx_short"] = dx_clean[0][:200]
-            p["dx_full"] = "\n".join(dx_clean)[:2000]
-        if ind_text:
-            p["_indications_text"] = ind_text  # ephemeral, used to diff later
-
-    # ---- COL 4: labs/studies/procedures/cultures ----
+    # ---- COL 5 (idx 4): labs/studies/procedures/cultures ----
     col4 = cells[4].strip()
     if col4:
         buckets = _classify_col5_text(col4)
@@ -910,14 +944,14 @@ def _parse_row_deterministic(cells: list[str]) -> Optional[dict]:
         if buckets["events"]:
             p["events"] = buckets["events"]
 
-    # ---- COL 5: vital signs ----
+    # ---- COL 6 (idx 5): signos vitales ----
     col5 = cells[5].strip()
     if col5:
         p["vital_signs"] = col5
 
-    # Metadata inferences
+    # Metadata defaults
     p["unit_classification"] = "Piso"
-    p["is_surgical"] = True  # default; user can flip manually
+    p["is_surgical"] = True
     p["is_pending_discharge"] = False
 
     return p
@@ -948,6 +982,25 @@ def _parse_censo_docx_deterministic(content: bytes) -> list[dict]:
                 logger.exception("Deterministic parse failed on row")
                 continue
             if p and p.get("name"):
+                # DEBUG: print raw columns before saving (per user request)
+                logger.info(
+                    "CENSO ROW → name=%r bed=%r\n[COL1]=%r\n[COL2]=%r\n[COL4]=%r\n[COL5]=%r\n[COL6]=%r",
+                    p.get("name"), p.get("bed"),
+                    cells[0] if len(cells) > 0 else "",
+                    cells[1] if len(cells) > 1 else "",
+                    cells[3] if len(cells) > 3 else "",
+                    cells[4] if len(cells) > 4 else "",
+                    cells[5] if len(cells) > 5 else "",
+                )
+                logger.info(
+                    "  PARSED → dx_short=%r  labs=%d studies=%d procedures=%d cultures=%d vital=%d",
+                    p.get("dx_short"),
+                    len(p.get("labs", "") or ""),
+                    len(p.get("studies", "") or ""),
+                    len(p.get("procedures", "") or ""),
+                    len(p.get("cultures", "") or ""),
+                    len(p.get("vital_signs", "") or ""),
+                )
                 patients.append(p)
     return patients
 
