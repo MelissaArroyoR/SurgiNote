@@ -59,6 +59,16 @@ Días de estancia (DEA) y días postoperatorios (DPQ) se calculan al vuelo desde
 - ✅ Línea de tiempo por paciente
 - ✅ UI iOS-optimizada: dark slate + amber, Manrope, botones ≥60px, safe-area, bottom tabs
 
+### 2026-02-XX — Etapa 3 (parser + Nota MedSys estilo R3 + WhatsApp + Entrenamiento IA)
+- ✅ **Parser Col5 estricto**: `labs` = solo LABS/GASA/GASV/EGO; `studies` = RX/TAC/USG/RM/ECG/PET-CT/SEGD/etc.; `procedures` = Colonoscopia/Endoscopia/Panendoscopia/Cirugía/RHP/Hallazgos/Biopsias/Paracentesis/Drenajes/Toracocentesis; `cultures` = Cultivos/Hemocultivos/Urocultivos/Gram/BLEE/Susceptibilidad. Chunk boundaries por keyword.
+- ✅ **Parser Col3**: separa diagnósticos reales de procedimientos con fecha (12/06/26 PANENDOSCOPIA…, PO LAPE + HEMICOLECTOMÍA) → van a `daily_entry.procedures`. Clasificaciones (PADUA/ECOG/TNM/ROCKALL/EC IVA/APACHE/SOFA/GCS/Hinchey/etc.) van al final de `dx_full` bajo subtítulo "CLASIFICACIONES:" pero NO en `dx_short`.
+- ✅ **Logs raw** de COL1/COL2/COL4/COL5/COL6 impresos antes de guardar cada paciente.
+- ✅ **Nota MedSys estilo R3**: TODO EN MAYÚSCULAS, sin listas/viñetas/numeración, párrafos corridos. Plantillas distintas para PISO vs UTI/UTIM (usa `patient.unit_classification`). Usa ejemplos de entrenamiento como referencia de estilo (nunca copia frases/nombres/fechas).
+- ✅ **WhatsApp al tratante**: inicia con "BUENOS DÍAS DR. <APELLIDO>. PASE CON <NOMBRE>, CAMA <CAMA>.", 5-10 líneas de resumen, cierre con pregunta contextual ("¿GUSTA QUE INICIEMOS VÍA ORAL?" / "¿GUSTA QUE VALOREMOS EGRESO?" / etc.). Sin bullets.
+- ✅ **Entrenamiento de IA** en /configuracion (5ª tab): 3 textareas (Hospitalización, UTI/UTIM, WhatsApp) que se guardan por usuario en la colección `training_examples`. La IA los usa como referencia de estilo en los prompts de generación.
+- ✅ **Bug fix**: POST /api/patients tolerante a body sin `is_surgical`/`is_pending_discharge` (filtramos None antes del spread).
+- ✅ Tests: `/app/tests/test_parser_etapa3.py` (unitario) + `/app/backend/tests/test_etapa3.py` (integración 12/12).
+
 ## Backlog (P1 / P2)
 
 ### P1

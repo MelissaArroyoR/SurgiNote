@@ -362,7 +362,8 @@ async def list_patients(user: dict = Depends(get_user)):
 
 @api.post("/patients", response_model=Patient)
 async def create_patient(body: PatientCreate, user: dict = Depends(get_user)):
-    patient = Patient(user_id=user["id"], **body.model_dump())
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    patient = Patient(user_id=user["id"], **payload)
     await db.patients.insert_one(patient.model_dump())
     return patient
 
