@@ -2168,7 +2168,10 @@ def get_stt():
 
 
 @api.post("/transcribe")
-async def transcribe(...):
+async def transcribe(
+    audio: UploadFile = File(...),
+    user: dict = Depends(get_user),
+):
     """Real transcription..."""
     try:
         content = await audio.read()
