@@ -2168,9 +2168,9 @@ def get_stt():
 
 
 @api.post("/transcribe")
-async def transcribe(audio: UploadFile = File(...), user: dict = Depends(get_user)):
-    """Real transcription via OpenAI Whisper (routed through Emergent proxy)."""
-       try:
+async def transcribe(...):
+    """Real transcription..."""
+    try:
         content = await audio.read()
 
         if len(content) < 1000:
