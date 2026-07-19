@@ -2170,17 +2170,19 @@ def get_stt():
 @api.post("/transcribe")
 async def transcribe(audio: UploadFile = File(...), user: dict = Depends(get_user)):
     """Real transcription via OpenAI Whisper (routed through Emergent proxy)."""
-    try:
+       try:
         content = await audio.read()
+
         if len(content) < 1000:
             raise HTTPException(status_code=400, detail="Audio demasiado corto")
-        # litellm expects a tuple (filename, bytes, mime) or a file-like object
+
         filename = audio.filename or "audio.webm"
-        # Ensure filename has a supported extension for validator
+
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         if ext not in ("mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"):
             filename = "audio.webm"
-                audio_file = io.BytesIO(content)
+
+        audio_file = io.BytesIO(content)
         audio_file.name = filename
 
         transcript = await client.audio.transcriptions.create(
@@ -2192,6 +2194,7 @@ async def transcribe(audio: UploadFile = File(...), user: dict = Depends(get_use
 
         text = transcript.text
         return {"text": text.strip()}
+
     except HTTPException:
         raise
     except Exception as e:
