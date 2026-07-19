@@ -2198,8 +2198,9 @@ async def transcribe(
         text = transcript.text
         return {"text": text.strip()}
 
-        except HTTPException:
+    except HTTPException:
         raise
+        
     except Exception as e:
         logger.exception("Transcription failed")
         raise HTTPException(
