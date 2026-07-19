@@ -2180,17 +2180,17 @@ async def transcribe(audio: UploadFile = File(...), user: dict = Depends(get_use
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         if ext not in ("mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"):
             filename = "audio.webm"
-        audio_file = io.BytesIO(content)
-audio_file.name = filename
+                audio_file = io.BytesIO(content)
+        audio_file.name = filename
 
-transcript = await client.audio.transcriptions.create(
-    model="whisper-1",
-    file=audio_file,
-    language="es",
-    prompt="Transcripción médica en español. Terminología de cirugía general, laboratorios, medicamentos."
-)
+        transcript = await client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file,
+            language="es",
+            prompt="Transcripción médica en español. Terminología de cirugía general, laboratorios, medicamentos."
+        )
 
-text = transcript.text
+        text = transcript.text
         return {"text": text.strip()}
     except HTTPException:
         raise
