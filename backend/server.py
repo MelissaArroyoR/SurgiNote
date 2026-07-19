@@ -13,12 +13,14 @@ import bcrypt
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from openai import AsyncOpenAI
-from emergentintegrations.llm.chat import LlmChat, UserMessage
-from emergentintegrations.llm.openai import OpenAISpeechToText
+from openai import AsyncOpenAI
 from docx import Document as DocxDocument
 
 from style_examples import (
@@ -34,7 +36,6 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
-EMERGENT_KEY = os.environ["EMERGENT_LLM_KEY"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRES_HOURS = 24 * 30
@@ -473,13 +474,21 @@ def build_patient_context(patient: dict) -> str:
 
 
 async def llm_generate(system_prompt: str, user_prompt: str) -> str:
-    chat = LlmChat(
-        api_key=EMERGENT_KEY,
-        session_id=f"surginote-{uuid.uuid4()}",
-        system_message=system_prompt,
-    ).with_model("openai", "gpt-5.2")
-    response = await chat.send_message(UserMessage(text=user_prompt))
-    return response if isinstance(response, str) else str(response)
+    response = await client.chat.completions.create(
+        model="gpt-5",
+        messages=[
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ]
+    )
+
+    return response.choices[0].message.content
 
 
 class GenerateBody(BaseModel):
@@ -2155,10 +2164,7 @@ _stt_client: Optional[OpenAISpeechToText] = None
 
 
 def get_stt():
-    global _stt_client
-    if _stt_client is None:
-        _stt_client = OpenAISpeechToText(api_key=EMERGENT_KEY)
-    return _stt_client
+    return client
 
 
 @api.post("/transcribe")
@@ -2174,15 +2180,17 @@ async def transcribe(audio: UploadFile = File(...), user: dict = Depends(get_use
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         if ext not in ("mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"):
             filename = "audio.webm"
-        stt = get_stt()
-        result = await stt.transcribe(
-            file=(filename, content, audio.content_type or "audio/webm"),
-            model="whisper-1",
-            response_format="text",
-            language="es",
-            prompt="Transcripción médica en español. Terminología de cirugía general, laboratorios, medicamentos.",
-        )
-        text = result if isinstance(result, str) else getattr(result, "text", str(result))
+        audio_file = io.BytesIO(content)
+audio_file.name = filename
+
+transcript = await client.audio.transcriptions.create(
+    model="whisper-1",
+    file=audio_file,
+    language="es",
+    prompt="Transcripción médica en español. Terminología de cirugía general, laboratorios, medicamentos."
+)
+
+text = transcript.text
         return {"text": text.strip()}
     except HTTPException:
         raise
