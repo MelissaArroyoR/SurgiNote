@@ -476,7 +476,7 @@ def build_patient_context(patient: dict) -> str:
 
 
 async def llm_generate(system_prompt: str, user_prompt: str) -> str:
-    response = await client.chat.completions.create(
+    response = await openai_client.chat.completions.create(
         model="gpt-5",
         messages=[
             {
