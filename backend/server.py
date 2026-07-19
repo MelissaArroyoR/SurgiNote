@@ -2160,7 +2160,7 @@ async def delete_additional_note(
     return {"ok": True}
 
 
-_stt_client: Optional[OpenAISpeechToText] = None
+
 
 
 def get_stt():
