@@ -15,13 +15,14 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from openai import AsyncOpenAI
 from openai import AsyncOpenAI
 from docx import Document as DocxDocument
+
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 from style_examples import (
     hospitalization_note_style_block,
