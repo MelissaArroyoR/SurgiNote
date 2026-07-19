@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from openai import AsyncOpenAI
 from docx import Document as DocxDocument
 
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 from style_examples import (
     hospitalization_note_style_block,
@@ -33,7 +33,9 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
 mongo_url = os.environ["MONGO_URL"]
-client = AsyncIOMotorClient(mongo_url)
+mongo_client = AsyncIOMotorClient(mongo_url)
+
+db = mongo_client.get_default_database()
 db = client[os.environ["DB_NAME"]]
 
 JWT_SECRET = os.environ["JWT_SECRET"]
@@ -2188,7 +2190,7 @@ async def transcribe(
         audio_file = io.BytesIO(content)
         audio_file.name = filename
 
-        transcript = await client.audio.transcriptions.create(
+        transcript = await openai_client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
             language="es",
