@@ -963,6 +963,72 @@ _CLASSIFICATION_KW = _re.compile(
 
 
 def _classify_col5_text(text: str) -> dict:
+    if not text:
+        return {
+            "labs": "",
+            "studies": "",
+            "procedures": "",
+            "cultures": "",
+            "events": ""
+        }
+
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+
+    sections = {
+        "labs": [],
+        "studies": [],
+        "procedures": [],
+        "cultures": [],
+        "events": []
+    }
+
+    current = "events"
+
+    for line in lines:
+        upper = line.upper()
+
+        if upper.startswith(("LABS", "GASA", "GASV", "EGO")):
+            current = "labs"
+            sections[current].append(line)
+            continue
+
+        if upper.startswith((
+            "TAC", "RX", "RM", "RMN", "USG",
+            "ECOCARDIOGRAMA", "ECO", "PET",
+            "EKG", "ECG"
+        )):
+            current = "studies"
+            sections[current].append(line)
+            continue
+
+        if upper.startswith((
+            "HALLAZGOS", "RHP",
+            "CIRUGIA", "CIRUGÍA",
+            "ENDOSCOPIA",
+            "COLONOSCOPIA",
+            "BIOPSIA",
+            "DRENAJE"
+        )):
+            current = "procedures"
+            sections[current].append(line)
+            continue
+
+        if upper.startswith((
+            "CULTIVO",
+            "CULTIVOS",
+            "HEMOCULTIVO",
+            "UROCULTIVO"
+        )):
+            current = "cultures"
+            sections[current].append(line)
+            continue
+
+        sections[current].append(line)
+
+    return {
+        k: "\n".join(v)
+        for k, v in sections.items()
+    }
     """Split col 5 text into labs/studies/procedures/cultures.
     STRICT rules per user spec (Etapa 3):
     - labs: SOLO chunks que empiezan con LABS/GASA/GASV/EGO
