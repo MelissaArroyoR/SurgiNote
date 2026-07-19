@@ -36,7 +36,7 @@ mongo_url = os.environ["MONGO_URL"]
 mongo_client = AsyncIOMotorClient(mongo_url)
 
 db = mongo_client["surginote"]
-db = client[os.environ["DB_NAME"]]
+db = mongo_client["surginote"]
 
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = "HS256"
