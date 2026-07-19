@@ -2195,11 +2195,14 @@ async def transcribe(audio: UploadFile = File(...), user: dict = Depends(get_use
         text = transcript.text
         return {"text": text.strip()}
 
-    except HTTPException:
+        except HTTPException:
         raise
     except Exception as e:
         logger.exception("Transcription failed")
-        raise HTTPException(status_code=500, detail=f"Error al transcribir: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al transcribir: {str(e)}"
+        )
 
 
 @api.get("/")
