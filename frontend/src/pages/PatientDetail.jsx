@@ -306,19 +306,109 @@ export default function PatientDetail() {
             <h3 className="font-heading font-bold text-base text-slate-900">Línea de tiempo</h3>
           </div>
           <div className="space-y-2">
-            {entries.map((e) => (
-              <div key={e.id} className="bg-white border border-slate-200 rounded-lg p-3" data-testid={`timeline-entry-${e.date}`}>
-                <div className="flex items-center justify-between mb-1.5">
-                  <div className="text-xs font-bold text-blue-600">{e.date}</div>
-                  {e.saved_to_pase && <span className="text-[10px] uppercase tracking-widest text-emerald-600">En pase</span>}
-                </div>
-                {(e.dictation || e.events || e.labs) && (
-                  <div className="text-slate-700 text-xs leading-snug line-clamp-3 pre-wrap">
-                    {e.dictation || e.events || e.labs}
-                  </div>
-                )}
-              </div>
-            ))}
+{entries.map((e) => (
+  <details
+    key={e.id}
+    className="bg-white border border-slate-200 rounded-lg p-3"
+    data-testid={`timeline-entry-${e.date}`}
+  >
+    <summary className="cursor-pointer flex items-center justify-between">
+      <span className="text-xs font-bold text-blue-600">
+        {e.date}
+      </span>
+
+      {e.saved_to_pase && (
+        <span className="text-[10px] uppercase tracking-widest text-emerald-600">
+          En pase
+        </span>
+      )}
+    </summary>
+
+    <div className="mt-3 text-xs whitespace-pre-wrap">
+
+      {e.dictation && (
+        <>
+          <b>📝 Dictado</b>
+          <br />
+          {e.dictation}
+          <br /><br />
+        </>
+      )}
+
+      {e.labs && (
+        <>
+          <b>🩸 Laboratorios</b>
+          <br />
+          {e.labs}
+          <br /><br />
+        </>
+      )}
+
+      {e.studies && (
+        <>
+          <b>📷 Estudios</b>
+          <br />
+          {e.studies}
+          <br /><br />
+        </>
+      )}
+
+      {e.procedures && (
+        <>
+          <b>🔪 Procedimientos</b>
+          <br />
+          {e.procedures}
+          <br /><br />
+        </>
+      )}
+
+      {e.cultures && (
+        <>
+          <b>🦠 Cultivos</b>
+          <br />
+          {e.cultures}
+          <br /><br />
+        </>
+      )}
+
+      {e.events && (
+        <>
+          <b>📌 Eventos</b>
+          <br />
+          {e.events}
+          <br /><br />
+        </>
+      )}
+
+      {e.ai_pase_summary && (
+        <>
+          <b>🤖 Resumen del Pase</b>
+          <br />
+          {e.ai_pase_summary}
+          <br /><br />
+        </>
+      )}
+
+      {e.ai_evolution_note && (
+        <>
+          <b>📄 Nota de Evolución</b>
+          <br />
+          {e.ai_evolution_note}
+          <br /><br />
+        </>
+      )}
+
+      {e.ai_whatsapp && (
+        <>
+          <b>💬 Mensaje al Tratante</b>
+          <br />
+          {e.ai_whatsapp}
+        </>
+      )}
+
+    </div>
+  </details>
+))}
           </div>
         </div>
       )}
