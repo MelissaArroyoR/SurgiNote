@@ -818,7 +818,7 @@ async def generate_note(patient_id: str, body: GenerateBody, user: dict = Depend
 
 @api.post("/pase/today")
 async def generate_full_pase(user: dict = Depends(get_user)):
-    target = today_iso()
+    target = "2026-07-24"
     patients = await db.patients.find({"user_id": user["id"], "active": True}, {"_id": 0}).to_list(500)
     patients.sort(key=lambda x: ((x.get("floor") or ""), (x.get("bed") or "")))
 
