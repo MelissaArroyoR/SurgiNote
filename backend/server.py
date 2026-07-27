@@ -962,150 +962,68 @@ _CLASSIFICATION_KW = _re.compile(
 )
 
 
-def _classify_col5_text(text: str) -> dict:
-    if not text:
-        return {
-            "labs": "",
-            "studies": "",
-            "procedures": "",
-            "cultures": "",
-            "events": ""
-        }
+def _classify_col5_text(text):
 
-    lines = [x.strip() for x in text.splitlines() if x.strip()]
-
-    sections = {
-        "labs": [],
-        "studies": [],
-        "procedures": [],
-        "cultures": [],
-        "events": []
+    sections={
+        "labs":[],
+        "studies":[],
+        "procedures":[],
+        "cultures":[],
+        "events":[]
     }
 
-    current = "events"
+    current="events"
 
-    for line in lines:
-        upper = line.upper()
+    for line in text.splitlines():
 
-        if upper.startswith(("LABS", "GASA", "GASV", "EGO")):
-            current = "labs"
-            sections[current].append(line)
+        l=line.strip()
+
+        if not l:
             continue
 
-        if upper.startswith((
-            "TAC", "RX", "RM", "RMN", "USG",
-            "ECOCARDIOGRAMA", "ECO", "PET",
-            "EKG", "ECG"
-        )):
-            current = "studies"
-            sections[current].append(line)
-            continue
+        u=l.upper()
 
-        if upper.startswith((
-            "HALLAZGOS", "RHP",
-            "CIRUGIA", "CIRUGÍA",
+        if "LABS" in u or "GASA" in u or "EGO" in u:
+            current="labs"
+
+        elif any(x in u for x in [
+            "TAC",
+            "ANGIOTAC",
+            "RX",
+            "RXTX",
+            "USG",
+            "RM",
+            "RMN",
+            "PET",
+            "ECOCARDIOGRAMA",
+            "EKG",
+            "ECG"
+        ]):
+            current="studies"
+
+        elif any(x in u for x in [
+            "HALLAZGOS",
+            "RHP",
             "ENDOSCOPIA",
             "COLONOSCOPIA",
+            "CIRUG",
+            "DRENAJE",
             "BIOPSIA",
-            "DRENAJE"
-        )):
-            current = "procedures"
-            sections[current].append(line)
-            continue
+            "PARACENTESIS"
+        ]):
+            current="procedures"
 
-        if upper.startswith((
+        elif any(x in u for x in [
             "CULTIVO",
-            "CULTIVOS",
             "HEMOCULTIVO",
-            "UROCULTIVO"
-        )):
-            current = "cultures"
-            sections[current].append(line)
-            continue
+            "UROCULTIVO",
+            "GRAM"
+        ]):
+            current="cultures"
 
-        sections[current].append(line)
+        sections[current].append(l)
 
-    return {
-        k: "\n".join(v)
-        for k, v in sections.items()
-    }
-    """Split col 5 text into labs/studies/procedures/cultures.
-    STRICT rules per user spec (Etapa 3):
-    - labs: SOLO chunks que empiezan con LABS/GASA/GASV/EGO
-    - studies: SOLO chunks que empiezan con RX/RXTX/TAC/ANGIOTAC/RM/RMN/USG/PET/ECG/ECO/SEGD/MASTOGRAF/etc.
-    - procedures: SOLO chunks que empiezan con COLONOSCOPIA/ENDOSCOPIA/PANENDOSCOPIA/CIRUGIA/RHP/HALLAZGOS/BIOPSIAS/PARACENTESIS/DRENAJES/etc.
-    - cultures: SOLO chunks que empiezan con CULTIVOS/HEMOCULTIVOS/UROCULTIVOS/GRAM/BLEE/etc.
-    - Un chunk termina cuando comienza otro keyword de OTRA categoría.
-    """
-    if not text or not text.strip():
-        return {"labs": "", "studies": "", "procedures": "", "cultures": "", "events": ""}
-    raw = text.strip()
-
-    # Anchor: chunk boundary starts BEFORE any category keyword OR a date.
-    # Ordering matters: more specific first so ANGIOTAC beats TAC etc.
-    _SPLIT_ANCHOR = _re.compile(
-        r"(?=(?:^|\n|\.\s+|;\s*)"
-        r"(?:LABS|GASA|GASV|EGO|"
-        r"ANGIOTAC|TAC(?:\s+(?:ABD|TX|C\/C|IV|VO|SIMPLE|CONTRAST))?|"
-        r"RXTX|RX|RMN|RM|USG|ULTRASONIDO|"
-        r"PET[\-\s]?CT|ECG|EKG|ECOCARDIOGRAMA|ECO|"
-        r"SEGD|MASTOGRAF|RADIOGRAF|TOMOGRAF|RESONANCIA|"
-        r"PANENDOSCOPIA|COLONOSCOPIA|ENDOSCOPIA|RHP|HALLAZGOS|"
-        r"CIRUG(?:I|Í)A|QUIR[UÚ]RGIC|PO\s+LAPE|LAPE|LAPAROSCOP|LAPAROTOM|"
-        r"HEMICOLECTOM|COLECISTECTOM|APENDICECTOM|ITALLMR|ILEOSTOM|COLOSTOM|"
-        r"PARACENTESIS|TORACOCENTESIS|BIOPSIAS?|DRENAJES?|"
-        r"HEMOCULTIVOS?|UROCULTIVOS?|CULTIVOS?|GRAM|BLEE|"
-        r"SUSCEPTIBILIDAD|DESARROLLO|MICROORGANISMOS?|ANTIBIOGRAMA|AISLAMIENTO)"
-        r"\b)",
-        _re.IGNORECASE,
-    )
-    # Also split before standalone dates (a "fecha subrayada" starts a new item)
-    _DATE_SPLIT = _re.compile(r"(?=\n\s*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b)")
-
-    # First split by keyword anchors
-    chunks = _SPLIT_ANCHOR.split(raw)
-    # Then refine by dates
-    refined: list[str] = []
-    for ch in chunks:
-        ch = ch.strip()
-        if not ch:
-            continue
-        subs = _DATE_SPLIT.split(ch)
-        for s in subs:
-            s = s.strip()
-            if s:
-                refined.append(s)
-
-    if not refined:
-        refined = [raw]
-
-    bins = {"labs": [], "studies": [], "procedures": [], "cultures": [], "events": []}
-
-    def _classify_chunk(chunk: str) -> str:
-        """Return the category based on the FIRST keyword found (leading token wins)."""
-        # Strip any leading date to look at the actual keyword
-        head = _re.sub(r"^\s*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\s*[\n\-]?\s*", "", chunk, count=1)
-        head_upper = head.upper().lstrip()
-
-        # Check cultures first (very specific)
-        if _re.match(r"(?:HEMOCULTIVOS?|UROCULTIVOS?|CULTIVOS?|GRAM|BLEE|SUSCEPTIBILIDAD|DESARROLLO|MICROORGANISMOS?|ANTIBIOGRAMA|AISLAMIENTO)\b", head_upper):
-            return "cultures"
-        # Procedures next
-        if _re.match(r"(?:PANENDOSCOPIA|COLONOSCOPIA|ENDOSCOPIA|RHP|HALLAZGOS|CIRUG|QUIR|PO\s+LAPE|LAPE|LAPAROSCOP|LAPAROTOM|HEMICOLECTOM|COLECISTECTOM|APENDICECTOM|ITALLMR|ILEOSTOM|COLOSTOM|PARACENTESIS|TORACOCENTESIS|BIOPSIAS?|DRENAJES?)\b", head_upper):
-            return "procedures"
-        # Imaging studies
-        if _re.match(r"(?:ANGIOTAC|TAC|RXTX|RX|RMN|RM|USG|ULTRASONIDO|PET|ECG|EKG|ECOCARDIOGRAMA|ECO|SEGD|MASTOGRAF|RADIOGRAF|TOMOGRAF|RESONANCIA)\b", head_upper):
-            return "studies"
-        # Labs
-        if _re.match(r"(?:LABS|GASA|GASV|EGO)\b", head_upper):
-            return "labs"
-        return "events"
-
-    for chunk in refined:
-        cat = _classify_chunk(chunk)
-        bins[cat].append(chunk)
-
-    return {k: "\n\n".join(v) for k, v in bins.items()}
+    return {k:"\n".join(v) for k,v in sections.items()}
 
 
 async def _parse_censo_with_gpt(raw_text: str) -> list[dict]:
