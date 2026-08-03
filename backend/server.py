@@ -964,66 +964,105 @@ _CLASSIFICATION_KW = _re.compile(
 
 def _classify_col5_text(text):
 
-    sections={
-        "labs":[],
-        "studies":[],
-        "procedures":[],
-        "cultures":[],
-        "events":[]
+    sections = {
+        "labs": [],
+        "studies": [],
+        "procedures": [],
+        "cultures": [],
+        "events": []
     }
 
-    current="events"
+    current = "events"
 
     for line in text.splitlines():
 
-        l=line.strip()
+        line = line.strip()
 
-        if not l:
+        if not line:
             continue
 
-        u=l.upper()
+        u = line.upper()
 
-        if "LABS" in u or "GASA" in u or "EGO" in u:
-            current="labs"
+        # ===== LABORATORIOS =====
+        if u.startswith((
+            "LABS",
+            "LABORATORIO",
+            "LABORATORIOS",
+            "GASA",
+            "GASV",
+            "EGO",
+            "BH",
+            "QS",
+            "PFH",
+            "ELECTROLITOS"
+        )):
+            current = "labs"
 
-        elif any(x in u for x in [
-            "TAC",
-            "ANGIOTAC",
+        # ===== ESTUDIOS =====
+        elif u.startswith((
             "RX",
             "RXTX",
-            "USG",
+            "TAC",
+            "ANGIOTAC",
             "RM",
             "RMN",
+            "USG",
+            "ULTRASONIDO",
             "PET",
-            "ECOCARDIOGRAMA",
+            "ECG",
             "EKG",
-            "ECG"
-        ]):
-            current="studies"
+            "ECOCARDIOGRAMA",
+            "ECO",
+            "SEGD"
+        )):
+            current = "studies"
 
-        elif any(x in u for x in [
+        # ===== PROCEDIMIENTOS =====
+        elif u.startswith((
             "HALLAZGOS",
             "RHP",
             "ENDOSCOPIA",
             "COLONOSCOPIA",
-            "CIRUG",
-            "DRENAJE",
+            "PANENDOSCOPIA",
             "BIOPSIA",
-            "PARACENTESIS"
-        ]):
-            current="procedures"
+            "BIOPSIAS",
+            "DRENAJE",
+            "DRENAJES",
+            "PARACENTESIS",
+            "TORACOCENTESIS",
+            "CIRUGIA",
+            "CIRUGÍA",
+            "LAPAROSCOP",
+            "LAPAROTOM",
+            "HEMICOLECTOM",
+            "COLECISTECTOM",
+            "APENDICECTOM",
+            "ILEOSTOM",
+            "COLOSTOM"
+        )):
+            current = "procedures"
 
-        elif any(x in u for x in [
+        # ===== CULTIVOS =====
+        elif u.startswith((
             "CULTIVO",
+            "CULTIVOS",
             "HEMOCULTIVO",
+            "HEMOCULTIVOS",
             "UROCULTIVO",
-            "GRAM"
-        ]):
-            current="cultures"
+            "UROCULTIVOS",
+            "GRAM",
+            "BLEE",
+            "SUSCEPTIBILIDAD",
+            "ANTIBIOGRAMA"
+        )):
+            current = "cultures"
 
-        sections[current].append(l)
+        sections[current].append(line)
 
-    return {k:"\n".join(v) for k,v in sections.items()}
+    return {
+        k: "\n".join(v)
+        for k, v in sections.items()
+    }
 
 
 async def _parse_censo_with_gpt(raw_text: str) -> list[dict]:
